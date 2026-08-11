@@ -47,7 +47,10 @@ final class MyujiguCoreTests: XCTestCase {
 
     func testPlayerStateParserKeepsPunctuationInMetadata() {
         let separator = String(Character(UnicodeScalar(31)))
-        let output = ["playing", "12500", "spotify:track:abc123", "Title | Remix", "Artist"].joined(separator: separator)
+        let output = [
+            "playing", "12500", "spotify:track:abc123", "Title | Remix", "Artist",
+            "Test Album", "180000", "https://i.scdn.co/image/test-cover",
+        ].joined(separator: separator)
         let state = SpotifyPlayer.parseState(output)
 
         XCTAssertEqual(state.player, .spotify)
@@ -55,6 +58,9 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(state.trackID, "abc123")
         XCTAssertEqual(state.positionMs, 12_500)
         XCTAssertEqual(state.title, "Title | Remix")
+        XCTAssertEqual(state.album, "Test Album")
+        XCTAssertEqual(state.durationMs, 180_000)
+        XCTAssertEqual(state.artworkURL?.absoluteString, "https://i.scdn.co/image/test-cover")
     }
 
     func testAppleMusicPlayerStateParser() {
@@ -164,7 +170,7 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(lyrics?.lines[1].startTimeMs, 4_000)
     }
 
-    func testAppleMusicCacheAllowsTTMLToEndBeforeTrack() async throws {
+    func testAppleMusicCacheMatchesCatalogMetadataWhenTTMLEndsBeforeTrack() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -179,12 +185,46 @@ final class MyujiguCoreTests: XCTestCase {
         """#
         let payload = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
         let payloadHex = payload.map { String(format: "%02X", $0) }.joined()
+        let wrongTTML = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en">
+          <body dur="06:30.000"><div>
+            <p begin="00:25.000" end="06:30.000">Lyrics from another song</p>
+          </div></body>
+        </tt>
+        """#
+        let wrongPayload = try JSONSerialization.data(withJSONObject: ["ttml": wrongTTML])
+        let wrongPayloadHex = wrongPayload.map { String(format: "%02X", $0) }.joined()
+        let metadata = try JSONSerialization.data(withJSONObject: [
+            "results": [
+                [
+                    "id": "wrong-song",
+                    "kind": "song",
+                    "name": "Another Song",
+                    "artistName": "Another Artist",
+                    "collectionName": "Another Album",
+                    "offers": [["assets": [["duration": 401]]]],
+                ],
+                [
+                    "id": "981035788",
+                    "kind": "song",
+                    "name": "Metadata omitted by Apple",
+                    "artistName": "Test Artist",
+                    "collectionName": "Test Album",
+                    "offers": [["assets": [["duration": 401]]]],
+                ],
+            ],
+        ])
+        let metadataHex = metadata.map { String(format: "%02X", $0) }.joined()
         let database = directory.appendingPathComponent("Cache.db")
         let query = """
         CREATE TABLE cfurl_cache_response(entry_ID INTEGER PRIMARY KEY, request_key TEXT);
         CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB);
-        INSERT INTO cfurl_cache_response VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=1');
+        INSERT INTO cfurl_cache_response VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=981035788');
         INSERT INTO cfurl_cache_receiver_data VALUES(1, 0, X'\(payloadHex)');
+        INSERT INTO cfurl_cache_response VALUES(2, 'https://se2.itunes.apple.com/ttmlLyrics?id=wrong-song');
+        INSERT INTO cfurl_cache_receiver_data VALUES(2, 0, X'\(wrongPayloadHex)');
+        INSERT INTO cfurl_cache_response VALUES(3, 'https://client-api.itunes.apple.com/lookup?id=playlist');
+        INSERT INTO cfurl_cache_receiver_data VALUES(3, 0, X'\(metadataHex)');
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -198,10 +238,52 @@ final class MyujiguCoreTests: XCTestCase {
         let cache = AppleMusicLyricsCache(cacheDirectory: directory)
         let lyrics = await cache.findLyrics(
             title: "Metadata omitted by Apple",
-            durationMs: 401_000
+            durationMs: 401_000,
+            artist: "Test Artist",
+            album: "Test Album"
         )
         XCTAssertEqual(lyrics?.lines.count, 1)
         XCTAssertEqual(lyrics?.lines[0].endTimeMs, 390_062)
+    }
+
+    func testAppleMusicCacheRejectsDurationOnlyMatch() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let ttml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en">
+          <body dur="03:00.000"><div>
+            <p begin="00:10.000" end="03:00.000">Lyrics from another song</p>
+          </div></body>
+        </tt>
+        """#
+        let payload = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
+        let payloadHex = payload.map { String(format: "%02X", $0) }.joined()
+        let database = directory.appendingPathComponent("Cache.db")
+        let query = """
+        CREATE TABLE cfurl_cache_response(entry_ID INTEGER PRIMARY KEY, request_key TEXT);
+        CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB);
+        INSERT INTO cfurl_cache_response VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=wrong-song');
+        INSERT INTO cfurl_cache_receiver_data VALUES(1, 0, X'\(payloadHex)');
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [database.path, query]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let cache = AppleMusicLyricsCache(cacheDirectory: directory)
+        let lyrics = await cache.findLyrics(
+            title: "Current Song",
+            durationMs: 180_000,
+            artist: "Current Artist"
+        )
+        XCTAssertNil(lyrics)
     }
 
     func testTOTPUsesRFCVector() {

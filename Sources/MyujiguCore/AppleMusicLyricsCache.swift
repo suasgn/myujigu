@@ -178,6 +178,24 @@ public enum AppleMusicLyricsParser {
 public actor AppleMusicLyricsCache {
     private static let rowSeparator = Character(UnicodeScalar(31))
 
+    private struct CachedResponse {
+        let requestKey: String
+        let data: Data
+    }
+
+    private struct CatalogMetadata {
+        let catalogID: String
+        let title: String
+        let artist: String
+        let album: String
+        let durationMs: Int?
+    }
+
+    private struct LyricsCandidate {
+        let catalogID: String?
+        let document: AppleMusicLyricsDocument
+    }
+
     private let cacheDirectory: URL
 
     public init(cacheDirectory: URL? = nil) {
@@ -189,21 +207,21 @@ public actor AppleMusicLyricsCache {
     public func findLyrics(
         title: String,
         durationMs: Int,
+        artist: String = "",
+        album: String = "",
         plainLyrics: String? = nil
     ) -> Lyrics? {
         let normalizedTitle = normalize(title)
         guard !normalizedTitle.isEmpty else { return nil }
         let normalizedPlainLyrics = plainLyrics.map(normalize) ?? ""
-        var durationFallback: Lyrics?
+        var candidates: [LyricsCandidate] = []
 
-        for data in cachedTTMLResponses() {
-            guard let document = AppleMusicLyricsParser.parseDocument(data) else { continue }
+        for response in cachedTTMLResponses() {
+            guard let document = AppleMusicLyricsParser.parseDocument(response.data) else {
+                continue
+            }
             if durationMs > 0,
-               document.durationMs > 0,
-               !timelinesCanMatch(
-                   trackDurationMs: durationMs,
-                   lyricDurationMs: document.durationMs
-               )
+               document.durationMs > durationMs + 3_000
             {
                 continue
             }
@@ -221,60 +239,225 @@ public actor AppleMusicLyricsCache {
                 }
             }
 
-            // Apple's current TTML response omits title and artist metadata.
-            // Keep the newest plausible-duration result as a final fallback;
-            // cache rows are already ordered newest first. TTML often ends at
-            // the final lyric, several seconds before the audio itself ends.
-            if durationFallback == nil,
-               durationMs > 0,
-               document.durationMs > 0,
-               timelinesCanMatch(
-                   trackDurationMs: durationMs,
-                   lyricDurationMs: document.durationMs
-               )
-            {
-                durationFallback = document.lyrics
-            }
+            candidates.append(
+                LyricsCandidate(
+                    catalogID: catalogID(in: response.requestKey),
+                    document: document
+                )
+            )
         }
-        return durationFallback
+
+        // Current Apple TTML omits the song title and artist. Its request URL
+        // still contains the catalog song ID, and Music caches catalog metadata
+        // for the same ID. Join those records so two similarly timed songs can
+        // never be confused merely because their durations happen to match.
+        let candidateIDs = Set(candidates.compactMap(\.catalogID))
+        guard !candidateIDs.isEmpty else { return nil }
+        let metadata = cachedCatalogMetadata(for: candidateIDs)
+        guard let matchedID = matchingCatalogID(
+            in: metadata,
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs
+        ) else {
+            return nil
+        }
+        return candidates.first { $0.catalogID == matchedID }?.document.lyrics
     }
 
-    private func cachedTTMLResponses() -> [Data] {
+    private func cachedTTMLResponses() -> [CachedResponse] {
+        cachedResponses(
+            where: "instr(lower(c.request_key), '/ttmllyrics?') > 0",
+            limit: 50
+        )
+    }
+
+    private func cachedCatalogResponses() -> [CachedResponse] {
+        cachedResponses(
+            where: """
+            instr(lower(c.request_key), '/lookup?') > 0
+            OR instr(lower(c.request_key), '/v1/catalog/') > 0
+            """,
+            limit: 50
+        )
+    }
+
+    private func cachedResponses(where condition: String, limit: Int) -> [CachedResponse] {
         let database = cacheDirectory.appendingPathComponent("Cache.db")
         guard FileManager.default.fileExists(atPath: database.path) else { return [] }
 
         let query = """
-        SELECT r.isDataOnFS, hex(r.receiver_data)
+        SELECT c.request_key, r.isDataOnFS, hex(r.receiver_data)
         FROM cfurl_cache_response AS c
         JOIN cfurl_cache_receiver_data AS r USING(entry_ID)
-        WHERE instr(lower(c.request_key), '/ttmllyrics?') > 0
+        WHERE \(condition)
         ORDER BY c.entry_ID DESC
-        LIMIT 50;
+        LIMIT \(limit);
         """
         guard let output = runSQLite(database: database, query: query) else { return [] }
 
         return output.split(whereSeparator: { $0.isNewline }).compactMap { row in
             let fields = row.split(
                 separator: Self.rowSeparator,
-                maxSplits: 1,
+                maxSplits: 2,
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 2,
-                  let receiverData = dataFromHex(String(fields[1]))
+            guard fields.count == 3,
+                  let receiverData = dataFromHex(String(fields[2]))
             else {
                 return nil
             }
 
-            if fields[0] == "1",
+            let data: Data?
+            if fields[1] == "1",
                let fileName = String(data: receiverData, encoding: .utf8)
             {
                 let payload = cacheDirectory
                     .appendingPathComponent("fsCachedData", isDirectory: true)
                     .appendingPathComponent(fileName)
-                return try? Data(contentsOf: payload, options: [.mappedIfSafe])
+                data = try? Data(contentsOf: payload, options: [.mappedIfSafe])
+            } else {
+                data = receiverData
             }
-            return receiverData
+            guard let data else { return nil }
+            return CachedResponse(requestKey: String(fields[0]), data: data)
         }
+    }
+
+    private func catalogID(in requestKey: String) -> String? {
+        URLComponents(string: requestKey)?.queryItems?
+            .first { $0.name == "id" }?
+            .value
+    }
+
+    private func cachedCatalogMetadata(for candidateIDs: Set<String>) -> [CatalogMetadata] {
+        var results: [CatalogMetadata] = []
+        for response in cachedCatalogResponses() {
+            guard let object = try? JSONSerialization.jsonObject(with: response.data) else {
+                continue
+            }
+            collectCatalogMetadata(from: object, candidateIDs: candidateIDs, into: &results)
+        }
+        return results
+    }
+
+    private func collectCatalogMetadata(
+        from object: Any,
+        candidateIDs: Set<String>,
+        into results: inout [CatalogMetadata]
+    ) {
+        if let dictionary = object as? [String: Any] {
+            if let catalogID = stringValue(dictionary["id"]),
+               candidateIDs.contains(catalogID),
+               let metadata = catalogMetadata(catalogID: catalogID, in: dictionary)
+            {
+                results.append(metadata)
+            }
+            for value in dictionary.values {
+                collectCatalogMetadata(from: value, candidateIDs: candidateIDs, into: &results)
+            }
+            return
+        }
+
+        if let array = object as? [Any] {
+            for value in array {
+                collectCatalogMetadata(from: value, candidateIDs: candidateIDs, into: &results)
+            }
+        }
+    }
+
+    private func catalogMetadata(
+        catalogID: String,
+        in dictionary: [String: Any]
+    ) -> CatalogMetadata? {
+        let attributes = dictionary["attributes"] as? [String: Any] ?? dictionary
+        let title = stringValue(attributes["name"])
+            ?? stringValue(attributes["trackName"])
+            ?? ""
+        let artist = stringValue(attributes["artistName"]) ?? ""
+        guard !title.isEmpty, !artist.isEmpty else { return nil }
+
+        let album = stringValue(attributes["albumName"])
+            ?? stringValue(attributes["collectionName"])
+            ?? ""
+        let durationMs = integerValue(attributes["durationInMillis"])
+            ?? integerValue(attributes["trackTimeMillis"])
+            ?? offerDurationMs(in: attributes)
+        return CatalogMetadata(
+            catalogID: catalogID,
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs
+        )
+    }
+
+    private func offerDurationMs(in attributes: [String: Any]) -> Int? {
+        guard let offers = attributes["offers"] as? [[String: Any]] else { return nil }
+        for offer in offers {
+            guard let assets = offer["assets"] as? [[String: Any]] else { continue }
+            for asset in assets {
+                if let seconds = doubleValue(asset["duration"]) {
+                    return Int((seconds * 1_000).rounded())
+                }
+            }
+        }
+        return nil
+    }
+
+    private func matchingCatalogID(
+        in metadata: [CatalogMetadata],
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int
+    ) -> String? {
+        let normalizedTitle = normalize(title)
+        let normalizedArtist = normalize(artist)
+        let normalizedAlbum = normalize(album)
+
+        let matches = metadata.filter { item in
+            guard normalize(item.title) == normalizedTitle else { return false }
+            if !normalizedArtist.isEmpty, normalize(item.artist) != normalizedArtist {
+                return false
+            }
+            if !normalizedAlbum.isEmpty, normalize(item.album) != normalizedAlbum {
+                return false
+            }
+            if durationMs > 0, let itemDurationMs = item.durationMs,
+               abs(itemDurationMs - durationMs) > 3_000
+            {
+                return false
+            }
+            return true
+        }
+        guard !matches.isEmpty else { return nil }
+
+        return matches.min { left, right in
+            abs((left.durationMs ?? durationMs) - durationMs)
+                < abs((right.durationMs ?? durationMs) - durationMs)
+        }?.catalogID
+    }
+
+    private func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return nil
+    }
+
+    private func integerValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
+        return nil
     }
 
     private func runSQLite(database: URL, query: String) -> String? {
@@ -329,18 +512,4 @@ public actor AppleMusicLyricsCache {
         return first.prefix(comparisonLength) == second.prefix(comparisonLength)
     }
 
-    private func timelinesCanMatch(trackDurationMs: Int, lyricDurationMs: Int) -> Bool {
-        let difference = trackDurationMs - lyricDurationMs
-        if difference >= 0 {
-            let trailingAudioAllowance = max(
-                15_000,
-                Int((Double(trackDurationMs) * 0.04).rounded())
-            )
-            return difference <= trailingAudioAllowance
-        }
-
-        // Permit small rounding or metadata differences, but not a lyric
-        // timeline that materially outlasts the current track.
-        return -difference <= 3_000
-    }
 }

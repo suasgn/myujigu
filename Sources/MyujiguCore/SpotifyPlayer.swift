@@ -21,7 +21,13 @@ public struct SpotifyPlayer: Sendable {
         set playbackState to (player state as string)
         set trackName to name of current track
         set trackArtist to artist of current track
-        return playbackState & unitSeparator & positionMilliseconds & unitSeparator & trackIdentifier & unitSeparator & trackName & unitSeparator & trackArtist
+        set trackAlbum to album of current track
+        set durationMilliseconds to duration of current track
+        set trackArtworkURL to ""
+        try
+          set trackArtworkURL to artwork url of current track
+        end try
+        return playbackState & unitSeparator & positionMilliseconds & unitSeparator & trackIdentifier & unitSeparator & trackName & unitSeparator & trackArtist & unitSeparator & trackAlbum & unitSeparator & durationMilliseconds & unitSeparator & trackArtworkURL
       end tell
     end run
     """#
@@ -83,6 +89,11 @@ public struct SpotifyPlayer: Sendable {
         let trackID = spotifyURI.hasPrefix("spotify:track:")
             ? String(spotifyURI.dropFirst("spotify:track:".count))
             : nil
+        let artworkURL: URL? = if fields.count > 7 {
+            Self.webURL(from: fields[7])
+        } else {
+            nil
+        }
 
         return PlayerState(
             status: status,
@@ -90,8 +101,21 @@ public struct SpotifyPlayer: Sendable {
             trackID: trackID,
             positionMs: Int(fields[1]) ?? 0,
             title: fields[3],
-            artist: fields[4]
+            artist: fields[4],
+            album: fields.count > 5 ? fields[5] : "",
+            durationMs: fields.count > 6 ? Int(fields[6]) ?? 0 : 0,
+            artworkURL: artworkURL
         )
+    }
+
+    private static func webURL(from value: String) -> URL? {
+        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http"
+        else {
+            return nil
+        }
+        return url
     }
 
     private static func runAppleScript(_ source: String) -> (status: Int32, output: String) {

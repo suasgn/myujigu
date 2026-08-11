@@ -3,6 +3,40 @@ import Foundation
 public struct AppleMusicPlayer: Sendable {
     private static let separator = Character(UnicodeScalar(31))
 
+    private static let artworkScript = #"""
+    on run argv
+      set destinationPath to item 1 of argv
+      set fileReference to missing value
+      tell application "Music"
+        try
+          set currentSong to current track
+          if (count of artworks of currentSong) is 0 then return ""
+          try
+            set artworkData to raw data of artwork 1 of currentSong
+          on error
+            set artworkData to data of artwork 1 of currentSong
+          end try
+        on error
+          return ""
+        end try
+      end tell
+
+      try
+        set destinationFile to POSIX file destinationPath
+        set fileReference to open for access destinationFile with write permission
+        set eof fileReference to 0
+        write artworkData to fileReference
+        close access fileReference
+        return destinationPath
+      on error
+        try
+          if fileReference is not missing value then close access fileReference
+        end try
+        return ""
+      end try
+    end run
+    """#
+
     private static let stateScript = #"""
     on run
       tell application "Music"
@@ -75,6 +109,25 @@ public struct AppleMusicPlayer: Sendable {
         }.value
     }
 
+    public func currentArtworkData() async -> Data? {
+        await Task.detached(priority: .utility) {
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("myujigu-artwork-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: destination) }
+
+            let result = Self.runAppleScript(
+                Self.artworkScript,
+                arguments: [destination.path]
+            )
+            guard result.status == 0,
+                  !result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return nil
+            }
+            return try? Data(contentsOf: destination)
+        }.value
+    }
+
     public static func parseState(_ output: String) -> PlayerState {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "stopped" || trimmed.isEmpty {
@@ -114,11 +167,14 @@ public struct AppleMusicPlayer: Sendable {
         )
     }
 
-    private static func runAppleScript(_ source: String) -> (status: Int32, output: String) {
+    private static func runAppleScript(
+        _ source: String,
+        arguments: [String] = []
+    ) -> (status: Int32, output: String) {
         let process = Process()
         let stdout = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
+        process.arguments = ["-e", source] + arguments
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
 

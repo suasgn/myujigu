@@ -76,6 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
             .store(in: &cancellables)
 
+        model.$showsMenuBarLyrics
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateLyricStripVisibility()
+            }
+            .store(in: &cancellables)
+
         model.$lyrics
             .combineLatest(model.$playerState)
             .receive(on: RunLoop.main)
@@ -178,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 420, height: 560)
+        popover.contentSize = NSSize(width: 540, height: 520)
         popover.contentViewController = NSHostingController(
             rootView: LyricsPopoverView(model: model)
         )
@@ -381,7 +389,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             (leftStripPanel, leftStripFrame),
             (rightStripPanel, rightStripFrame),
         ] {
-            let shouldShow = menuBarIsVisible && !frame.isEmpty
+            let shouldShow = model.showsMenuBarLyrics
+                && menuBarIsVisible
+                && !frame.isEmpty
             if shouldShow, panel?.isVisible == false {
                 panel?.orderFrontRegardless()
             } else if !shouldShow, panel?.isVisible == true {
@@ -885,7 +895,14 @@ private final class MarqueeStatusView: NSView {
             textLayer.string = text
             textLayer.font = font.fontName as CFTypeRef
             textLayer.fontSize = font.pointSize
-            textLayer.foregroundColor = color.cgColor
+            // CATextLayer stores a fixed CGColor, so resolve AppKit's semantic
+            // label color in this view's menu-bar appearance rather than the
+            // app-wide appearance active on the current thread.
+            var resolvedColor: CGColor?
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                resolvedColor = color.cgColor
+            }
+            textLayer.foregroundColor = resolvedColor
             textLayer.alignmentMode = .left
             textLayer.isWrapped = false
             textLayer.truncationMode = .none

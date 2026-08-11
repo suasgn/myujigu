@@ -79,6 +79,7 @@ public struct PlayerState: Equatable, Sendable {
     public let artist: String
     public let album: String
     public let durationMs: Int
+    public let artworkURL: URL?
 
     public static let stopped = PlayerState(
         status: .stopped,
@@ -88,7 +89,8 @@ public struct PlayerState: Equatable, Sendable {
         title: "",
         artist: "",
         album: "",
-        durationMs: 0
+        durationMs: 0,
+        artworkURL: nil
     )
 
     public init(
@@ -99,7 +101,8 @@ public struct PlayerState: Equatable, Sendable {
         title: String,
         artist: String,
         album: String = "",
-        durationMs: Int = 0
+        durationMs: Int = 0,
+        artworkURL: URL? = nil
     ) {
         self.status = status
         self.player = player
@@ -109,6 +112,7 @@ public struct PlayerState: Equatable, Sendable {
         self.artist = artist
         self.album = album
         self.durationMs = durationMs
+        self.artworkURL = artworkURL
     }
 }
 

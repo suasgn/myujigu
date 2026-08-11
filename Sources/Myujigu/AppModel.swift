@@ -1,17 +1,26 @@
 import AppKit
 import Combine
 import Foundation
+import ImageIO
 import MyujiguCore
 
 @MainActor
 final class AppModel: ObservableObject {
+    private enum ArtworkCache {
+        static let countLimit = 6
+        static let totalCostLimit = 16 * 1_024 * 1_024
+        static let maximumPixelSize = 512
+    }
+
     @Published private(set) var playerState: PlayerState = .stopped
+    @Published private(set) var artworkImage: NSImage?
     @Published private(set) var lyrics: Lyrics?
     @Published private(set) var lyricsSource: LyricsSource?
     @Published private(set) var lyricsError: String?
     @Published private(set) var isLoadingLyrics = false
     @Published private(set) var activeLineIndex: Int?
     @Published private(set) var menuBarText = "Myujigu"
+    @Published private(set) var showsMenuBarLyrics = false
     @Published private(set) var hasCredential = false
     @Published var settingsMessage: String?
 
@@ -20,19 +29,27 @@ final class AppModel: ObservableObject {
     private let cefCache = CEFLyricsCache()
     private let appleMusicCache = AppleMusicLyricsCache()
     private let credentials = CredentialStore()
+    private let artworkCache = NSCache<NSString, NSImage>()
     private var api: SpotifyAPI?
     private var activePlayer: PlayerKind?
     private var pollTask: Task<Void, Never>?
     private var lyricsTask: Task<Void, Never>?
+    private var artworkTask: Task<Void, Never>?
+    private var pauseVisibilityTask: Task<Void, Never>?
     private let lyricsRetryNanoseconds: UInt64 = 3_000_000_000
+    private let pauseHideDelayNanoseconds: UInt64 = 5_000_000_000
 
     init() {
         hasCredential = credentials.load() != nil
+        artworkCache.countLimit = ArtworkCache.countLimit
+        artworkCache.totalCostLimit = ArtworkCache.totalCostLimit
     }
 
     deinit {
         pollTask?.cancel()
         lyricsTask?.cancel()
+        artworkTask?.cancel()
+        pauseVisibilityTask?.cancel()
     }
 
     func start() {
@@ -51,6 +68,10 @@ final class AppModel: ObservableObject {
         pollTask = nil
         lyricsTask?.cancel()
         lyricsTask = nil
+        artworkTask?.cancel()
+        artworkTask = nil
+        pauseVisibilityTask?.cancel()
+        pauseVisibilityTask = nil
     }
 
     func send(_ command: SpotifyCommand) {
@@ -124,17 +145,22 @@ final class AppModel: ObservableObject {
         let freshState = await readCurrentPlayerState()
         guard !Task.isCancelled else { return }
 
+        let oldState = playerState
         let oldTrackID = playerState.trackID
         playerState = freshState
+        updateMenuBarLyricsVisibility(from: oldState, to: freshState)
 
         if freshState.trackID != oldTrackID {
             lyricsTask?.cancel()
+            artworkTask?.cancel()
+            artworkImage = nil
             lyrics = nil
             lyricsSource = nil
             lyricsError = nil
             activeLineIndex = nil
 
             if let trackID = freshState.trackID {
+                beginLoadingArtwork(for: freshState)
                 beginLoadingLyrics(trackID: trackID, player: freshState.player)
             } else {
                 isLoadingLyrics = false
@@ -145,8 +171,139 @@ final class AppModel: ObservableObject {
         updateMenuBarText()
     }
 
+    private func updateMenuBarLyricsVisibility(
+        from oldState: PlayerState,
+        to newState: PlayerState
+    ) {
+        switch newState.status {
+        case .playing:
+            pauseVisibilityTask?.cancel()
+            pauseVisibilityTask = nil
+            showsMenuBarLyrics = newState.trackID != nil
+
+        case .paused:
+            let pauseJustStarted = oldState.status != .paused
+                || oldState.trackID != newState.trackID
+            guard pauseJustStarted else { return }
+
+            pauseVisibilityTask?.cancel()
+            showsMenuBarLyrics = newState.trackID != nil
+            let pausedTrackID = newState.trackID
+            let hideDelay = pauseHideDelayNanoseconds
+            pauseVisibilityTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: hideDelay)
+                } catch {
+                    return
+                }
+                guard let self,
+                      playerState.status == .paused,
+                      playerState.trackID == pausedTrackID
+                else {
+                    return
+                }
+                showsMenuBarLyrics = false
+                pauseVisibilityTask = nil
+            }
+
+        case .stopped, .unavailable:
+            pauseVisibilityTask?.cancel()
+            pauseVisibilityTask = nil
+            showsMenuBarLyrics = false
+        }
+    }
+
+    private func beginLoadingArtwork(for state: PlayerState) {
+        guard let trackID = state.trackID else { return }
+        let cacheKey = "\(state.player?.rawValue ?? "unknown"):\(trackID)" as NSString
+        if let cachedImage = artworkCache.object(forKey: cacheKey) {
+            artworkImage = cachedImage
+            return
+        }
+
+        artworkTask = Task { [weak self] in
+            guard let self else { return }
+            let data: Data?
+            switch state.player {
+            case .spotify:
+                data = await remoteArtworkData(from: state.artworkURL)
+            case .appleMusic:
+                data = await appleMusicPlayer.currentArtworkData()
+            case nil:
+                data = nil
+            }
+
+            guard !Task.isCancelled,
+                  playerState.trackID == trackID,
+                  let data,
+                  let artwork = makeCachedArtwork(from: data)
+            else {
+                return
+            }
+            artworkCache.setObject(artwork.image, forKey: cacheKey, cost: artwork.cost)
+            artworkImage = artwork.image
+        }
+    }
+
+    private func makeCachedArtwork(from data: Data) -> (image: NSImage, cost: Int)? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else {
+            return nil
+        }
+
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: ArtworkCache.maximumPixelSize,
+        ] as CFDictionary
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            thumbnailOptions
+        ) else {
+            return nil
+        }
+
+        let (decodedByteCount, overflowed) = thumbnail.bytesPerRow.multipliedReportingOverflow(
+            by: thumbnail.height
+        )
+        let cost = overflowed ? ArtworkCache.totalCostLimit : decodedByteCount
+        let image = NSImage(
+            cgImage: thumbnail,
+            size: NSSize(width: thumbnail.width, height: thumbnail.height)
+        )
+        return (image, cost)
+    }
+
+    private func remoteArtworkData(from url: URL?) async -> Data? {
+        guard let url else { return nil }
+        var request = URLRequest(
+            url: url,
+            cachePolicy: .returnCacheDataElseLoad,
+            timeoutInterval: 15
+        )
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard !Task.isCancelled,
+                  let response = response as? HTTPURLResponse,
+                  (200..<300).contains(response.statusCode),
+                  !data.isEmpty,
+                  data.count <= 20 * 1_024 * 1_024
+            else {
+                return nil
+            }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
     private func readCurrentPlayerState() async -> PlayerState {
         var fallback: PlayerState?
+        var pausedCandidate: (player: PlayerKind, state: PlayerState)?
         var candidates: [PlayerKind] = []
         if let activePlayer {
             candidates.append(activePlayer)
@@ -164,17 +321,28 @@ final class AppModel: ObservableObject {
                 state = await appleMusicPlayer.currentState()
             }
 
-            if state.trackID != nil,
-               (state.status == .playing || state.status == .paused)
-            {
+            if state.trackID != nil, state.status == .playing {
                 activePlayer = candidate
                 return state
+            }
+            if state.trackID != nil,
+               state.status == .paused,
+               pausedCandidate == nil
+            {
+                // Keep this as a fallback, but continue checking whether the
+                // other open player has started playback.
+                pausedCandidate = (candidate, state)
             }
             if fallback == nil
                 || (fallback?.status == .unavailable && state.status != .unavailable)
             {
                 fallback = state
             }
+        }
+
+        if let pausedCandidate {
+            activePlayer = pausedCandidate.player
+            return pausedCandidate.state
         }
 
         activePlayer = nil
@@ -217,6 +385,8 @@ final class AppModel: ObservableObject {
                     if let cached = await appleMusicCache.findLyrics(
                         title: playerState.title,
                         durationMs: playerState.durationMs,
+                        artist: playerState.artist,
+                        album: playerState.album,
                         plainLyrics: appleMusicPlainLyrics
                     ) {
                         guard !Task.isCancelled, playerState.trackID == trackID else { return }

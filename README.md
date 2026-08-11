@@ -9,11 +9,11 @@
 A native menu-bar app that keeps synced Spotify and Apple Music lyrics visible while you listen.
 
 ```sh
-make app
-open ".build/release/Myujigu.app"
+open Myujigu.xcodeproj
 ```
 
 - Keeps the active lyric in the macOS menu bar
+- Shows album artwork from Spotify and Apple Music in the player panel
 - Scrolls long lyric lines automatically
 - Shows full, synchronized lyrics in a compact popover
 - Includes previous, play/pause, and next controls
@@ -40,16 +40,23 @@ Permissions can be changed in **System Settings → Privacy & Security**.
 
 ## Development
 
-Requirements: macOS 13 or newer and Swift 6. Xcode Command Line Tools are sufficient.
+Requirements: macOS 13 or newer and Xcode.
+
+Open `Myujigu.xcodeproj`, select the **Myujigu → My Mac** scheme, and press Run. Use
+**Product → Test** for the `MyujiguCoreTests` suite and **Product → Archive** to
+create an Xcode archive.
+
+The Swift package remains available for command-line development:
 
 ```sh
 make run
 make test
 ```
 
-Opening `Package.swift` in Xcode also creates a **Myujigu → My Mac** scheme. Myujigu is an agent-style app, so it does not create a Dock icon or a normal app window.
+Myujigu is an agent-style app, so it does not create a Dock icon or a normal app window.
 
-The standalone build is ad-hoc signed and not notarized. macOS may require Control-clicking the app and choosing **Open** the first time it launches.
+Local builds and archives use **Sign to Run Locally** and are not notarized. Select
+your Apple Developer team under **Signing & Capabilities** before distribution.
 
 ## Contributions
 

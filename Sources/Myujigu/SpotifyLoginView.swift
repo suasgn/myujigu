@@ -9,20 +9,45 @@ struct SpotifyLoginView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(red: 0.16, green: 0.74, blue: 0.45))
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 38, height: 38)
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Sign in with Spotify")
-                        .font(.headline)
-                    Text("This private login session is discarded when the window closes.")
+                        .font(.system(size: 15, weight: .bold))
+                    Text("Private browser session · Keychain storage")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button("Cancel") { dismiss() }
-            }
-            .padding(14)
 
-            Divider()
+                Spacer()
+
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.06), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Cancel")
+                .accessibilityLabel("Cancel")
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 64)
+            .background(.regularMaterial)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 1)
+            }
 
             SpotifyLoginWebView { cookie in
                 if saveCookie(cookie) {
@@ -33,14 +58,19 @@ struct SpotifyLoginView: View {
             }
 
             if saveFailed {
-                Divider()
-                Text("Spotify signed in, but the login could not be saved to Keychain.")
+                Label(
+                    "Spotify signed in, but the login could not be saved to Keychain.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .padding(10)
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
             }
         }
-        .frame(width: 520, height: 680)
+        .frame(width: 560, height: 680)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
