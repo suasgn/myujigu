@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "name": "Debug Myujigu",
+            "target": "Myujigu",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Myujigu"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "name": "Release Myujigu",
+            "target": "Myujigu",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Myujigu"
+        }
+    ]
+}
