@@ -213,7 +213,13 @@ final class MyujiguCoreTests: XCTestCase {
             xmlns:itunes="http://itunes.apple.com/lyric-ttml-extensions"
             xmlns:ttm="http://www.w3.org/ns/ttml#metadata"
             xml:lang="en-US" itunes:timing="Line">
-          <head><metadata><ttm:title>Test Song</ttm:title></metadata></head>
+          <head><metadata>
+            <ttm:title>Test Song</ttm:title>
+            <ttm:agent type="person"><ttm:name type="full">Test Artist</ttm:name></ttm:agent>
+            <songwriters xmlns="http://music.apple.com/lyric-ttml-internal">
+              <songwriter>Test Writer</songwriter>
+            </songwriters>
+          </metadata></head>
           <body dur="00:00:08.500"><div>
             <p begin="00:00:01.250" end="00:00:03.500">First test line</p>
             <p begin="4.000s"><span>Second</span> <span>test line</span></p>
@@ -224,6 +230,8 @@ final class MyujiguCoreTests: XCTestCase {
         let document = try XCTUnwrap(AppleMusicLyricsParser.parseDocument(data))
 
         XCTAssertEqual(document.title, "Test Song")
+        XCTAssertEqual(document.artists, ["Test Artist"])
+        XCTAssertEqual(document.songwriters, ["Test Writer"])
         XCTAssertEqual(document.durationMs, 8_500)
         XCTAssertEqual(document.lyrics.provider, "Apple Music")
         XCTAssertEqual(document.lyrics.language, "en-US")
@@ -431,6 +439,56 @@ final class MyujiguCoreTests: XCTestCase {
         )
         XCTAssertEqual(lyrics?.lines.count, 1)
         XCTAssertEqual(lyrics?.lines[0].startTimeMs, 15_761)
+    }
+
+    func testAppleMusicCacheMatchesTTMLSongwriterWhenMusicHidesPlainLyrics() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let ttml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml"
+            xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xml:lang="en">
+          <head><metadata>
+            <ttm:agent type="person" xml:id="v1"/>
+            <iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal">
+              <songwriters><songwriter>Taylor Swift</songwriter></songwriters>
+            </iTunesMetadata>
+          </metadata></head>
+          <body dur="3:28.198"><div>
+            <p begin="11.407" end="14.292">Knew he was a killer first time that I saw him</p>
+          </div></body>
+        </tt>
+        """#
+        let payload = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
+        let payloadHex = payload.map { String(format: "%02X", $0) }.joined()
+        let database = directory.appendingPathComponent("Cache.db")
+        let query = """
+        CREATE TABLE cfurl_cache_response(entry_ID INTEGER PRIMARY KEY, request_key TEXT);
+        CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB);
+        INSERT INTO cfurl_cache_response VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=1445766080');
+        INSERT INTO cfurl_cache_receiver_data VALUES(1, 0, X'\(payloadHex)');
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [database.path, query]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let cache = AppleMusicLyricsCache(cacheDirectory: directory)
+        let lyrics = await cache.findLyrics(
+            title: "...Ready For It?",
+            durationMs: 208_000,
+            artist: "Taylor Swift"
+        )
+        XCTAssertEqual(
+            lyrics?.lines.map(\.words),
+            ["Knew he was a killer first time that I saw him"]
+        )
     }
 
     func testAppleMusicCacheRejectsDurationOnlyMatch() async throws {

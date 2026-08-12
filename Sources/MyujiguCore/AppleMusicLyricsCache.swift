@@ -2,6 +2,8 @@ import Foundation
 
 struct AppleMusicLyricsDocument: Sendable {
     let title: String
+    let artists: [String]
+    let songwriters: [String]
     let durationMs: Int
     let lyrics: Lyrics
 }
@@ -42,6 +44,8 @@ public enum AppleMusicLyricsParser {
 
         return AppleMusicLyricsDocument(
             title: delegate.title,
+            artists: delegate.artists,
+            songwriters: delegate.songwriters,
             durationMs: delegate.durationMs,
             lyrics: Lyrics(
                 syncType: "LINE_SYNCED",
@@ -91,12 +95,19 @@ public enum AppleMusicLyricsParser {
         }
 
         private(set) var title = ""
+        private(set) var artists: [String] = []
+        private(set) var songwriters: [String] = []
         private(set) var language: String?
         private(set) var durationMs = 0
         private(set) var lines: [ParsedLine] = []
         private var pendingLine: PendingLine?
         private var isReadingTitle = false
         private var pendingTitle = ""
+        private var isInsideAgent = false
+        private var isReadingArtist = false
+        private var pendingArtist = ""
+        private var isReadingSongwriter = false
+        private var pendingSongwriter = ""
 
         func parser(
             _ parser: XMLParser,
@@ -111,6 +122,14 @@ public enum AppleMusicLyricsParser {
             case "body":
                 durationMs = attribute(named: "dur", in: attributeDict)
                     .flatMap(AppleMusicLyricsParser.timeMilliseconds) ?? 0
+            case "agent":
+                isInsideAgent = true
+            case "name" where isInsideAgent:
+                isReadingArtist = true
+                pendingArtist = ""
+            case "songwriter":
+                isReadingSongwriter = true
+                pendingSongwriter = ""
             case "title" where pendingLine == nil:
                 isReadingTitle = true
                 pendingTitle = ""
@@ -133,6 +152,10 @@ public enum AppleMusicLyricsParser {
         func parser(_ parser: XMLParser, foundCharacters string: String) {
             if pendingLine != nil {
                 pendingLine?.words.append(string)
+            } else if isReadingArtist {
+                pendingArtist.append(string)
+            } else if isReadingSongwriter {
+                pendingSongwriter.append(string)
             } else if isReadingTitle {
                 pendingTitle.append(string)
             }
@@ -147,6 +170,29 @@ public enum AppleMusicLyricsParser {
             if elementName == "title", isReadingTitle {
                 title = normalizedWhitespace(pendingTitle)
                 isReadingTitle = false
+                return
+            }
+
+            if elementName == "name", isReadingArtist {
+                let artist = normalizedWhitespace(pendingArtist)
+                if !artist.isEmpty, !artists.contains(artist) {
+                    artists.append(artist)
+                }
+                isReadingArtist = false
+                return
+            }
+
+            if elementName == "agent" {
+                isInsideAgent = false
+                return
+            }
+
+            if elementName == "songwriter", isReadingSongwriter {
+                let songwriter = normalizedWhitespace(pendingSongwriter)
+                if !songwriter.isEmpty, !songwriters.contains(songwriter) {
+                    songwriters.append(songwriter)
+                }
+                isReadingSongwriter = false
                 return
             }
 
@@ -252,18 +298,29 @@ public actor AppleMusicLyricsCache {
         // for the same ID. Join those records so two similarly timed songs can
         // never be confused merely because their durations happen to match.
         let candidateIDs = Set(candidates.compactMap(\.catalogID))
-        guard !candidateIDs.isEmpty else { return nil }
-        let metadata = cachedCatalogMetadata(for: candidateIDs)
-        guard let matchedID = matchingCatalogID(
-            in: metadata,
-            title: title,
-            artist: artist,
-            album: album,
-            durationMs: durationMs
-        ) else {
-            return nil
+        if !candidateIDs.isEmpty {
+            let metadata = cachedCatalogMetadata(for: candidateIDs)
+            if let matchedID = matchingCatalogID(
+                in: metadata,
+                title: title,
+                artist: artist,
+                album: album,
+                durationMs: durationMs
+            ) {
+                return candidates.first { $0.catalogID == matchedID }?.document.lyrics
+            }
         }
-        return candidates.first { $0.catalogID == matchedID }?.document.lyrics
+
+        // Music does not expose lyrics through AppleScript for many streaming
+        // tracks, even while its Lyrics view is showing synchronized words.
+        // Modern Apple TTML often includes its vocal agents. Some releases use
+        // an empty agent but still list the performer among their songwriters,
+        // so use either credit plus a close duration as a cache-only fallback.
+        return matchingArtistLyrics(
+            in: candidates,
+            artist: artist,
+            durationMs: durationMs
+        )
     }
 
     private func cachedTTMLResponses() -> [CachedResponse] {
@@ -439,6 +496,36 @@ public actor AppleMusicLyricsCache {
             abs((left.durationMs ?? durationMs) - durationMs)
                 < abs((right.durationMs ?? durationMs) - durationMs)
         }?.catalogID
+    }
+
+    private func matchingArtistLyrics(
+        in candidates: [LyricsCandidate],
+        artist: String,
+        durationMs: Int
+    ) -> Lyrics? {
+        let normalizedArtist = normalize(artist)
+        guard !normalizedArtist.isEmpty, durationMs > 0 else { return nil }
+
+        let matches = candidates.filter { candidate in
+            guard candidate.document.durationMs > 0,
+                  abs(candidate.document.durationMs - durationMs) <= 15_000
+            else {
+                return false
+            }
+            let artistHints = candidate.document.artists + candidate.document.songwriters
+            return artistHints.contains { artistHint in
+                let normalizedHint = normalize(artistHint)
+                guard normalizedHint.count >= 4 else { return false }
+                return normalizedArtist == normalizedHint
+                    || normalizedArtist.contains(normalizedHint)
+                    || normalizedHint.contains(normalizedArtist)
+            }
+        }
+
+        return matches.min { left, right in
+            abs(left.document.durationMs - durationMs)
+                < abs(right.document.durationMs - durationMs)
+        }?.document.lyrics
     }
 
     private func stringValue(_ value: Any?) -> String? {
