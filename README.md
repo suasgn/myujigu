@@ -6,7 +6,7 @@
 
 ![Swift](https://img.shields.io/badge/Swift-F54A2A?logo=swift&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=F0F0F0)
 
-A native menu-bar app that keeps synced Spotify and Apple Music lyrics visible while you listen.
+A native menu-bar app that keeps synchronized lyrics visible while you listen in Spotify, Apple Music, browsers, and other macOS media players.
 
 ```sh
 open Myujigu.xcodeproj
@@ -17,15 +17,17 @@ open Myujigu.xcodeproj
 - Scrolls long lyric lines automatically
 - Shows full, synchronized lyrics in a compact popover
 - Includes previous, play/pause, and next controls
-- Supports Spotify Desktop and Apple Music
+- Supports Spotify Desktop and Apple Music natively
+- Follows other apps that publish playback metadata to macOS Now Playing
 - Uses camera-safe lyric lanes on MacBooks with a notch
+- Lets each side independently use automatic safe sizing or a fixed width from the center or notch
 - Reads cached lyrics first and keeps Spotify credentials in Keychain
 - Written in Swift and SwiftUI
 - macOS 13+
 
 ## How it works
 
-Myujigu follows the current track and playback position through macOS Automation. It reads synchronized lyrics already cached by Spotify Desktop or Apple Music, then highlights the active line as the song plays.
+Myujigu follows Spotify and Apple Music through macOS Automation and reads their own synchronized lyric sources. For other players, it reads the active macOS Now Playing session through MediaRemote and requests matching lyrics from LRCLIB using the track title, artist, album, and duration. Spotify and Apple Music never fall back to LRCLIB.
 
 For Spotify cache misses, open the music-note menu-bar item, select the gear, and choose **Sign In with Spotify**. The login runs in a temporary isolated web view; Myujigu stores only the resulting `sp_dc` session cookie in macOS Keychain and sends it only to Spotify.
 
@@ -35,6 +37,8 @@ For a new Apple Music track that has not been cached yet, open the track's Lyric
 
 - **Automation** — required to read playback state and control Spotify or Music.
 - **Accessibility** — optional; used to measure the available menu-bar space beside the camera housing. Without it, Myujigu safely uses the right lyric lane only.
+
+Media players other than Spotify and Music do not require Automation permission, but they must publish useful title and artist metadata to macOS Now Playing. Universal player support uses Apple's private MediaRemote framework and is intended for direct distribution rather than the Mac App Store.
 
 Permissions can be changed in **System Settings → Privacy & Security**.
 

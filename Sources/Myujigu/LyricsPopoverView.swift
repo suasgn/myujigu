@@ -262,19 +262,28 @@ struct LyricsPopoverView: View {
     }
 
     private var accent: Color {
-        model.playerState.player == .appleMusic
-            ? Color(red: 0.98, green: 0.25, blue: 0.42)
-            : Color(red: 0.16, green: 0.74, blue: 0.45)
+        switch model.playerState.player {
+        case .appleMusic: return Color(red: 0.98, green: 0.25, blue: 0.42)
+        case .spotify: return Color(red: 0.16, green: 0.74, blue: 0.45)
+        case .system: return Color(red: 0.39, green: 0.55, blue: 0.96)
+        case nil: return Color(red: 0.16, green: 0.74, blue: 0.45)
+        }
     }
 
     private var playerSymbol: String {
-        model.playerState.player == .appleMusic ? "music.note" : "waveform"
+        switch model.playerState.player {
+        case .appleMusic: return "music.note"
+        case .spotify: return "waveform"
+        case .system: return "hifispeaker.fill"
+        case nil: return "waveform"
+        }
     }
 
     private var playerName: String {
         switch model.playerState.player {
         case .appleMusic: return "Apple Music"
         case .spotify: return "Spotify"
+        case .system: return model.playerState.sourceName ?? "Now Playing"
         case nil: return "Menu bar lyrics"
         }
     }
@@ -328,12 +337,22 @@ struct LyricsPopoverView: View {
             )
         }
         if model.playerState.status == .unavailable {
-            let playerName = model.playerState.player == .appleMusic ? "Music" : "Spotify"
+            let message: String
+            switch model.playerState.player {
+            case .appleMusic:
+                message = "Open Music, then allow Automation access in System Settings."
+            case .spotify:
+                message = "Open Spotify, then allow Automation access in System Settings."
+            case .system:
+                message = "macOS did not provide a readable Now Playing session."
+            case nil:
+                message = "Start a supported media player and try again."
+            }
             return EmptyLyricsState(
                 isLoading: false,
                 symbol: "exclamationmark.triangle",
                 title: "Player unavailable",
-                message: "Open \(playerName), then allow Automation access in System Settings."
+                message: message
             )
         }
         if model.playerState.trackID == nil {
@@ -341,7 +360,7 @@ struct LyricsPopoverView: View {
                 isLoading: false,
                 symbol: "music.note",
                 title: "Ready when you are",
-                message: "Play something in Spotify or Music. Lyrics will settle into this space automatically."
+                message: "Play something in a macOS Now Playing-compatible app. Lyrics will settle into this space automatically."
             )
         }
         return EmptyLyricsState(
@@ -616,7 +635,7 @@ private struct SettingsView: View {
 
             settingsContent
         }
-        .frame(width: 520, height: 410)
+        .frame(width: 540, height: 550)
         .background(.ultraThinMaterial)
         .sheet(isPresented: $showingSpotifyLogin) {
             SpotifyLoginView { cookie in
@@ -675,7 +694,7 @@ private struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Settings")
                         .font(.system(size: 19, weight: .bold))
-                    Text("Connections and privacy")
+                    Text("Menu bar, connections, and privacy")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -686,6 +705,36 @@ private struct SettingsView: View {
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.bottom, 24)
+
+            Text("MENU BAR LYRICS")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(1.2)
+                .foregroundStyle(.tertiary)
+
+            VStack(spacing: 8) {
+                menuBarLaneControls(
+                    "Left",
+                    layout: $model.menuBarLyricsLeftLayout,
+                    value: $model.fixedMenuBarLyricsLeftWidth
+                )
+                menuBarLaneControls(
+                    "Right",
+                    layout: $model.menuBarLyricsRightLayout,
+                    value: $model.fixedMenuBarLyricsRightWidth
+                )
+            }
+            .padding(.top, 10)
+
+            Text("Each side can use safe available space or a fixed width extending outward from the screen center or notch.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 7)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+                .padding(.vertical, 18)
 
             Text("SPOTIFY")
                 .font(.system(size: 9, weight: .bold))
@@ -732,7 +781,7 @@ private struct SettingsView: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.08))
                 .frame(height: 1)
-                .padding(.vertical, 22)
+                .padding(.vertical, 18)
 
             Text("PRIVACY")
                 .font(.system(size: 9, weight: .bold))
@@ -744,7 +793,7 @@ private struct SettingsView: View {
                 .foregroundStyle(accent)
                 .padding(.top, 12)
 
-            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify.")
+            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify. For other players, track title, artist, album, and duration are sent to LRCLIB to find lyrics.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -755,6 +804,35 @@ private struct SettingsView: View {
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
+    }
+
+    private func menuBarLaneControls(
+        _ title: String,
+        layout: Binding<MenuBarLyricsLayout>,
+        value: Binding<Double>
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 12.5, weight: .medium))
+                .frame(width: 34, alignment: .leading)
+
+            Picker("\(title) layout", selection: layout) {
+                ForEach(MenuBarLyricsLayout.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 120)
+
+            Slider(value: value, in: 120...1_200, step: 20)
+                .disabled(layout.wrappedValue == .automatic)
+
+            Text("\(Int(value.wrappedValue)) pt")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .trailing)
+        }
     }
 }
 

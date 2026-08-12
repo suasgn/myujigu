@@ -29,7 +29,7 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Myujigu reads the current song and playback position from Spotify or Music to keep lyrics synchronized.</string>
+    <string>Myujigu reads the current song and playback position from Spotify or Music to keep lyrics synchronized and control playback.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Myujigu</string>
 </dict>

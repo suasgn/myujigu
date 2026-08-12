@@ -4,6 +4,20 @@ import Foundation
 import ImageIO
 import MyujiguCore
 
+enum MenuBarLyricsLayout: String, CaseIterable, Identifiable {
+    case automatic
+    case fixed
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .fixed: return "Fixed"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private enum ArtworkCache {
@@ -23,11 +37,87 @@ final class AppModel: ObservableObject {
     @Published private(set) var showsMenuBarLyrics = false
     @Published private(set) var hasCredential = false
     @Published var settingsMessage: String?
+    @Published var menuBarLyricsLeftLayout: MenuBarLyricsLayout = {
+        let defaults = UserDefaults.standard
+        if let rawValue = defaults.string(forKey: "menuBarLyricsLeftLayout"),
+           let layout = MenuBarLyricsLayout(rawValue: rawValue) {
+            return layout
+        }
+        switch defaults.string(forKey: "menuBarLyricsLayout") {
+        case MenuBarLyricsLayout.fixed.rawValue, "fixedLeft": return .fixed
+        default: return .automatic
+        }
+    }() {
+        didSet {
+            UserDefaults.standard.set(
+                menuBarLyricsLeftLayout.rawValue,
+                forKey: "menuBarLyricsLeftLayout"
+            )
+        }
+    }
+    @Published var menuBarLyricsRightLayout: MenuBarLyricsLayout = {
+        let defaults = UserDefaults.standard
+        if let rawValue = defaults.string(forKey: "menuBarLyricsRightLayout"),
+           let layout = MenuBarLyricsLayout(rawValue: rawValue) {
+            return layout
+        }
+        switch defaults.string(forKey: "menuBarLyricsLayout") {
+        case MenuBarLyricsLayout.fixed.rawValue, "fixedRight": return .fixed
+        default: return .automatic
+        }
+    }() {
+        didSet {
+            UserDefaults.standard.set(
+                menuBarLyricsRightLayout.rawValue,
+                forKey: "menuBarLyricsRightLayout"
+            )
+        }
+    }
+    @Published var fixedMenuBarLyricsLeftWidth: Double = {
+        let defaults = UserDefaults.standard
+        let savedWidth = (defaults.object(forKey: "fixedMenuBarLyricsLeftWidth") as? NSNumber)?
+            .doubleValue
+            ?? (defaults.object(forKey: "fixedMenuBarLyricsWidth") as? NSNumber)?.doubleValue
+        return min(max(savedWidth ?? 360, 120), 1_200)
+    }() {
+        didSet {
+            let clampedWidth = min(max(fixedMenuBarLyricsLeftWidth, 120), 1_200)
+            if fixedMenuBarLyricsLeftWidth != clampedWidth {
+                fixedMenuBarLyricsLeftWidth = clampedWidth
+                return
+            }
+            UserDefaults.standard.set(
+                fixedMenuBarLyricsLeftWidth,
+                forKey: "fixedMenuBarLyricsLeftWidth"
+            )
+        }
+    }
+    @Published var fixedMenuBarLyricsRightWidth: Double = {
+        let defaults = UserDefaults.standard
+        let savedWidth = (defaults.object(forKey: "fixedMenuBarLyricsRightWidth") as? NSNumber)?
+            .doubleValue
+            ?? (defaults.object(forKey: "fixedMenuBarLyricsWidth") as? NSNumber)?.doubleValue
+        return min(max(savedWidth ?? 360, 120), 1_200)
+    }() {
+        didSet {
+            let clampedWidth = min(max(fixedMenuBarLyricsRightWidth, 120), 1_200)
+            if fixedMenuBarLyricsRightWidth != clampedWidth {
+                fixedMenuBarLyricsRightWidth = clampedWidth
+                return
+            }
+            UserDefaults.standard.set(
+                fixedMenuBarLyricsRightWidth,
+                forKey: "fixedMenuBarLyricsRightWidth"
+            )
+        }
+    }
 
     private let player = SpotifyPlayer()
     private let appleMusicPlayer = AppleMusicPlayer()
+    private let systemPlayer = SystemNowPlayingPlayer()
     private let cefCache = CEFLyricsCache()
     private let appleMusicCache = AppleMusicLyricsCache()
+    private let lrclib = LRCLIBClient()
     private let credentials = CredentialStore()
     private let artworkCache = NSCache<NSString, NSImage>()
     private var api: SpotifyAPI?
@@ -77,10 +167,15 @@ final class AppModel: ObservableObject {
     func send(_ command: SpotifyCommand) {
         Task { [weak self] in
             guard let self else { return }
-            if playerState.player == .appleMusic {
+            switch playerState.player {
+            case .appleMusic:
                 await appleMusicPlayer.send(command)
-            } else {
+            case .spotify:
                 await player.send(command)
+            case .system:
+                await systemPlayer.send(command)
+            case nil:
+                return
             }
             try? await Task.sleep(nanoseconds: 150_000_000)
             await refreshPlayer()
@@ -124,9 +219,12 @@ final class AppModel: ObservableObject {
         case .paused: return "Paused"
         case .stopped: return "Nothing playing"
         case .unavailable:
-            return playerState.player == .appleMusic
-                ? "Music unavailable"
-                : "Spotify unavailable"
+            switch playerState.player {
+            case .appleMusic: return "Music unavailable"
+            case .spotify: return "Spotify unavailable"
+            case .system: return "Now Playing unavailable"
+            case nil: return "Player unavailable"
+            }
         }
     }
 
@@ -229,6 +327,8 @@ final class AppModel: ObservableObject {
                 data = await remoteArtworkData(from: state.artworkURL)
             case .appleMusic:
                 data = await appleMusicPlayer.currentArtworkData()
+            case .system:
+                data = await systemPlayer.currentArtworkData()
             case nil:
                 data = nil
             }
@@ -305,7 +405,7 @@ final class AppModel: ObservableObject {
         var fallback: PlayerState?
         var pausedCandidate: (player: PlayerKind, state: PlayerState)?
         var candidates: [PlayerKind] = []
-        if let activePlayer {
+        if let activePlayer, activePlayer != .system {
             candidates.append(activePlayer)
         }
         for candidate in [PlayerKind.spotify, .appleMusic] where !candidates.contains(candidate) {
@@ -319,6 +419,8 @@ final class AppModel: ObservableObject {
                 state = await player.currentState()
             case .appleMusic:
                 state = await appleMusicPlayer.currentState()
+            case .system:
+                continue
             }
 
             if state.trackID != nil, state.status == .playing {
@@ -340,19 +442,50 @@ final class AppModel: ObservableObject {
             }
         }
 
+        let systemState = await systemPlayer.currentState()
+        let representsNativePlayer = SystemNowPlayingPlayer.isNativePlayer(
+            bundleIdentifier: systemState.bundleIdentifier,
+            sourceName: systemState.sourceName
+        )
+        if !representsNativePlayer,
+           systemState.trackID != nil,
+           systemState.status == .playing
+        {
+            activePlayer = .system
+            return systemState
+        }
+
+        // Control Center identifies the most recently active paused session,
+        // which is more useful than an arbitrary paused native app.
+        if !representsNativePlayer,
+           systemState.trackID != nil,
+           systemState.status == .paused
+        {
+            activePlayer = .system
+            return systemState
+        }
+
         if let pausedCandidate {
             activePlayer = pausedCandidate.player
             return pausedCandidate.state
         }
 
         activePlayer = nil
+        if !representsNativePlayer, systemState.status == .unavailable {
+            return fallback ?? systemState
+        }
         return fallback ?? .stopped
     }
 
     private func isRunning(_ player: PlayerKind) -> Bool {
-        let bundleIdentifier = switch player {
-        case .spotify: "com.spotify.client"
-        case .appleMusic: "com.apple.Music"
+        let bundleIdentifier: String
+        switch player {
+        case .spotify:
+            bundleIdentifier = "com.spotify.client"
+        case .appleMusic:
+            bundleIdentifier = "com.apple.Music"
+        case .system:
+            return false
         }
         return NSRunningApplication.runningApplications(
             withBundleIdentifier: bundleIdentifier
@@ -375,6 +508,43 @@ final class AppModel: ObservableObject {
 
         lyricsTask = Task { [weak self] in
             guard let self else { return }
+
+            if sourcePlayer == .system {
+                let state = playerState
+                guard !SystemNowPlayingPlayer.isNativePlayer(
+                    bundleIdentifier: state.bundleIdentifier,
+                    sourceName: state.sourceName
+                ) else {
+                    recordLyricsFailure("Spotify and Apple Music use their native lyric sources.")
+                    return
+                }
+                guard !state.title.isEmpty, !state.artist.isEmpty else {
+                    recordLyricsFailure(
+                        "This player did not provide enough track metadata for LRCLIB."
+                    )
+                    return
+                }
+                do {
+                    let fetched = try await lrclib.fetchLyrics(
+                        title: state.title,
+                        artist: state.artist,
+                        album: state.album,
+                        durationMs: state.durationMs,
+                        ignoreCache: force
+                    )
+                    guard !Task.isCancelled, playerState.trackID == trackID else { return }
+                    if let fetched {
+                        install(fetched, source: .lrclib)
+                    } else {
+                        recordLyricsFailure("LRCLIB has no lyrics for this track.")
+                    }
+                } catch {
+                    guard !Task.isCancelled, playerState.trackID == trackID else { return }
+                    recordLyricsFailure(error.localizedDescription)
+                }
+                return
+            }
+
             var appleMusicPlainLyrics: String?
 
             while !Task.isCancelled, playerState.trackID == trackID {

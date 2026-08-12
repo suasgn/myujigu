@@ -278,6 +278,7 @@ public actor AppleMusicLyricsCache {
             where: """
             instr(lower(c.request_key), '/lookup?') > 0
             OR instr(lower(c.request_key), '/v1/catalog/') > 0
+            OR instr(lower(c.request_key), '/v1/editorial/') > 0
             """,
             limit: 50
         )

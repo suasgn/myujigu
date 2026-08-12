@@ -81,6 +81,132 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(state.durationMs, 180_000)
     }
 
+    func testSystemNowPlayingStateParser() throws {
+        let json = #"""
+        {
+          "title": "Browser Song",
+          "artist": "Test Artist",
+          "album": "Test Album",
+          "duration": 193.091,
+          "elapsedTime": 20.0,
+          "calculatedPosition": 21.25,
+          "playbackRate": 1,
+          "uniqueIdentifier": "browser-track-1",
+          "mediaType": "Audio",
+          "appName": "Test Browser",
+          "bundleIdentifier": "com.example.browser"
+        }
+        """#
+        let state = SystemNowPlayingPlayer.parseState(json)
+
+        XCTAssertEqual(state.player, .system)
+        XCTAssertEqual(state.status, .playing)
+        XCTAssertEqual(state.positionMs, 21_250)
+        XCTAssertEqual(state.durationMs, 193_091)
+        XCTAssertEqual(state.title, "Browser Song")
+        XCTAssertEqual(state.artist, "Test Artist")
+        XCTAssertEqual(state.sourceName, "Test Browser")
+        XCTAssertEqual(state.bundleIdentifier, "com.example.browser")
+        XCTAssertTrue(try XCTUnwrap(state.trackID).hasPrefix("now-playing:"))
+        XCTAssertEqual(SystemNowPlayingPlayer.parseState(json).trackID, state.trackID)
+    }
+
+    func testSystemNowPlayingRecognizesNativePlayers() {
+        XCTAssertTrue(
+            SystemNowPlayingPlayer.isNativePlayer(
+                bundleIdentifier: "com.spotify.client",
+                sourceName: "Spotify"
+            )
+        )
+        XCTAssertTrue(
+            SystemNowPlayingPlayer.isNativePlayer(
+                bundleIdentifier: "com.apple.Music",
+                sourceName: "Music"
+            )
+        )
+        XCTAssertFalse(
+            SystemNowPlayingPlayer.isNativePlayer(
+                bundleIdentifier: "com.example.browser",
+                sourceName: "Test Browser"
+            )
+        )
+    }
+
+    func testLRCParserHandlesOffsetsFractionsAndRepeatedTimestamps() throws {
+        let lrc = #"""
+        [offset:+100]
+        [00:01.20][00:03.250]First line
+        [00:05.5]Second line
+        """#
+        let lyrics = try XCTUnwrap(LRCParser.parse(lrc, durationMs: 8_000))
+
+        XCTAssertEqual(lyrics.provider, "LRCLIB")
+        XCTAssertEqual(lyrics.syncType, "LINE_SYNCED")
+        XCTAssertEqual(lyrics.lines.map(\.startTimeMs), [1_300, 3_350, 5_600])
+        XCTAssertEqual(lyrics.lines.map(\.endTimeMs), [3_350, 5_600, 8_000])
+        XCTAssertEqual(lyrics.lines.map(\.words), ["First line", "First line", "Second line"])
+    }
+
+    func testLRCLIBClientRequestsSecondsAndParsesSyncedLyrics() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-lrclib-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LRCLIBURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            LRCLIBURLProtocolStub.handler = nil
+        }
+        LRCLIBURLProtocolStub.handler = { request in
+            let response = #"""
+            {
+              "id": 42,
+              "trackName": "Browser Song",
+              "artistName": "Test Artist",
+              "albumName": "Test Album",
+              "duration": 193.091,
+              "instrumental": false,
+              "plainLyrics": "First line\nSecond line",
+              "syncedLyrics": "[00:01.25]First line\n[00:04.00]Second line"
+            }
+            """#
+            let http = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+            )
+            return (http, Data(response.utf8))
+        }
+
+        let client = LRCLIBClient(
+            baseURL: URL(string: "https://lrclib.test")!,
+            session: session,
+            cacheDirectory: directory
+        )
+        let lyrics = try await client.fetchLyrics(
+            title: "Browser Song",
+            artist: "Test Artist",
+            album: "Test Album",
+            durationMs: 193_091
+        )
+
+        XCTAssertEqual(lyrics?.provider, "LRCLIB")
+        XCTAssertEqual(lyrics?.lines.map(\.startTimeMs), [1_250, 4_000])
+        let request = try XCTUnwrap(LRCLIBURLProtocolStub.lastRequest)
+        let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.path, "/api/get")
+        XCTAssertEqual(
+            components.queryItems?.first { $0.name == "duration" }?.value,
+            "193.091"
+        )
+    }
+
     func testAppleMusicTTMLParser() throws {
         let ttml = #"""
         <tt xmlns="http://www.w3.org/ns/ttml"
@@ -246,6 +372,67 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(lyrics?.lines[0].endTimeMs, 390_062)
     }
 
+    func testAppleMusicCacheMatchesMetadataFromEditorialResponse() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let ttml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml" xml:lang="id">
+          <body dur="3:13.091"><div>
+            <p begin="15.761" end="23.914">A synchronized test line</p>
+          </div></body>
+        </tt>
+        """#
+        let payload = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
+        let payloadHex = payload.map { String(format: "%02X", $0) }.joined()
+        let metadata = try JSONSerialization.data(withJSONObject: [
+            "resources": [
+                "songs": [
+                    "6781391180": [
+                        "id": "6781391180",
+                        "type": "songs",
+                        "attributes": [
+                            "name": "MMG (My Mine Gueh)",
+                            "artistName": "Naykilla",
+                            "albumName": "MMG (My Mine Gueh) - Single",
+                            "durationInMillis": 193_091,
+                        ],
+                    ],
+                ],
+            ],
+        ])
+        let metadataHex = metadata.map { String(format: "%02X", $0) }.joined()
+        let database = directory.appendingPathComponent("Cache.db")
+        let query = """
+        CREATE TABLE cfurl_cache_response(entry_ID INTEGER PRIMARY KEY, request_key TEXT);
+        CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB);
+        INSERT INTO cfurl_cache_response VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=6781391180');
+        INSERT INTO cfurl_cache_receiver_data VALUES(1, 0, X'\(payloadHex)');
+        INSERT INTO cfurl_cache_response VALUES(2, 'https://amp-api-edge.music.apple.com/v1/editorial/id/groupings?name=music');
+        INSERT INTO cfurl_cache_receiver_data VALUES(2, 0, X'\(metadataHex)');
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [database.path, query]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let cache = AppleMusicLyricsCache(cacheDirectory: directory)
+        let lyrics = await cache.findLyrics(
+            title: "MMG (My Mine Gueh)",
+            durationMs: 193_091,
+            artist: "Naykilla",
+            album: "MMG (My Mine Gueh) - Single"
+        )
+        XCTAssertEqual(lyrics?.lines.count, 1)
+        XCTAssertEqual(lyrics?.lines[0].startTimeMs, 15_761)
+    }
+
     func testAppleMusicCacheRejectsDurationOnlyMatch() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
@@ -299,4 +486,35 @@ final class MyujiguCoreTests: XCTestCase {
         }
         XCTAssertEqual(SpotifyAPI.decodeSecret(encoded), expected)
     }
+}
+
+private final class LRCLIBURLProtocolStub: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var lastRequest: URLRequest?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lastRequest = request
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

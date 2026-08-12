@@ -24,6 +24,8 @@
 		10000000000000000000000F /* MyujiguCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* MyujiguCore.framework */; };
 		100000000000000000000010 /* MyujiguCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* MyujiguCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		100000000000000000000011 /* MyujiguCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* MyujiguCore.framework */; };
+		100000000000000000000012 /* LRCLIB.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* LRCLIB.swift */; };
+		100000000000000000000013 /* SystemNowPlayingPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* SystemNowPlayingPlayer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +78,8 @@
 		200000000000000000000010 /* MyujiguCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = MyujiguCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000011 /* Myujigu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Myujigu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000012 /* MyujiguCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MyujiguCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000013 /* LRCLIB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRCLIB.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* SystemNowPlayingPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemNowPlayingPlayer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -143,9 +147,11 @@
 				20000000000000000000000B /* AppleMusicPlayer.swift */,
 				20000000000000000000000C /* CEFLyricsCache.swift */,
 				20000000000000000000000A /* CredentialStore.swift */,
+				200000000000000000000013 /* LRCLIB.swift */,
 				200000000000000000000007 /* Models.swift */,
 				200000000000000000000008 /* SpotifyAPI.swift */,
 				200000000000000000000009 /* SpotifyPlayer.swift */,
+				200000000000000000000014 /* SystemNowPlayingPlayer.swift */,
 			);
 			path = MyujiguCore;
 			sourceTree = "<group>";
@@ -313,9 +319,11 @@
 				10000000000000000000000B /* AppleMusicPlayer.swift in Sources */,
 				10000000000000000000000C /* CEFLyricsCache.swift in Sources */,
 				10000000000000000000000A /* CredentialStore.swift in Sources */,
+				100000000000000000000012 /* LRCLIB.swift in Sources */,
 				100000000000000000000007 /* Models.swift in Sources */,
 				100000000000000000000008 /* SpotifyAPI.swift in Sources */,
 				100000000000000000000009 /* SpotifyPlayer.swift in Sources */,
+				100000000000000000000013 /* SystemNowPlayingPlayer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -68,6 +68,7 @@ public enum PlayerStatus: String, Codable, Sendable {
 public enum PlayerKind: String, Codable, Sendable {
     case spotify
     case appleMusic
+    case system
 }
 
 public struct PlayerState: Equatable, Sendable {
@@ -80,6 +81,8 @@ public struct PlayerState: Equatable, Sendable {
     public let album: String
     public let durationMs: Int
     public let artworkURL: URL?
+    public let sourceName: String?
+    public let bundleIdentifier: String?
 
     public static let stopped = PlayerState(
         status: .stopped,
@@ -90,7 +93,9 @@ public struct PlayerState: Equatable, Sendable {
         artist: "",
         album: "",
         durationMs: 0,
-        artworkURL: nil
+        artworkURL: nil,
+        sourceName: nil,
+        bundleIdentifier: nil
     )
 
     public init(
@@ -102,7 +107,9 @@ public struct PlayerState: Equatable, Sendable {
         artist: String,
         album: String = "",
         durationMs: Int = 0,
-        artworkURL: URL? = nil
+        artworkURL: URL? = nil,
+        sourceName: String? = nil,
+        bundleIdentifier: String? = nil
     ) {
         self.status = status
         self.player = player
@@ -113,6 +120,8 @@ public struct PlayerState: Equatable, Sendable {
         self.album = album
         self.durationMs = durationMs
         self.artworkURL = artworkURL
+        self.sourceName = sourceName
+        self.bundleIdentifier = bundleIdentifier
     }
 }
 
@@ -120,6 +129,7 @@ public enum LyricsSource: String, Sendable {
     case spotifyCache = "Spotify cache"
     case spotifyAPI = "Spotify API"
     case appleMusicCache = "Apple Music cache"
+    case lrclib = "LRCLIB"
 }
 
 public enum LyricsParser {

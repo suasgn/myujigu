@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let rightMarqueeView = MarqueeStatusView()
     private var leftStripPanel: NSPanel!
     private var rightStripPanel: NSPanel!
+    private var leftStripBackdrop: MenuBarBackdropView!
+    private var rightStripBackdrop: MenuBarBackdropView!
     private var model: AppModel!
     private var cancellables = Set<AnyCancellable>()
     private var layoutTimer: Timer?
@@ -37,8 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApplication.shared.setActivationPolicy(.accessory)
         statusItem.isVisible = true
         model = AppModel()
-        leftStripPanel = makeLyricStripPanel(for: leftMarqueeView)
-        rightStripPanel = makeLyricStripPanel(for: rightMarqueeView)
+        (leftStripPanel, leftStripBackdrop) = makeLyricStripPanel(for: leftMarqueeView)
+        (rightStripPanel, rightStripBackdrop) = makeLyricStripPanel(for: rightMarqueeView)
 
         if let button = statusItem.button {
             button.target = self
@@ -81,6 +83,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.updateLyricStripVisibility()
+            }
+            .store(in: &cancellables)
+
+        model.$menuBarLyricsLeftLayout
+            .combineLatest(model.$fixedMenuBarLyricsLeftWidth)
+            .removeDuplicates {
+                $0.0 == $1.0 && $0.1 == $1.1
+            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuBarState(force: true)
+            }
+            .store(in: &cancellables)
+
+        model.$menuBarLyricsRightLayout
+            .combineLatest(model.$fixedMenuBarLyricsRightWidth)
+            .removeDuplicates {
+                $0.0 == $1.0 && $0.1 == $1.1
+            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuBarState(force: true)
             }
             .store(in: &cancellables)
 
@@ -204,7 +228,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover = nil
     }
 
-    private func makeLyricStripPanel(for view: MarqueeStatusView) -> NSPanel {
+    private func makeLyricStripPanel(
+        for view: MarqueeStatusView
+    ) -> (panel: NSPanel, backdrop: MenuBarBackdropView) {
         let panel = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -229,9 +255,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         view.showsNote = false
         view.wantsLayer = true
         view.autoresizingMask = [.width, .height]
-        panel.contentView = view
+
+        let container = NSView(frame: .zero)
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let backdrop = MenuBarBackdropView(statusItem: statusItem)
+        backdrop.isHidden = true
+        backdrop.autoresizingMask = [.width, .height]
+
+        container.addSubview(backdrop)
+        container.addSubview(view)
+        panel.contentView = container
         view.prepareForDisplay()
-        return panel
+        return (panel, backdrop)
     }
 
     private func updateMenuBarLayout(force: Bool = false) {
@@ -300,25 +337,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let menuBarY = window.frame.minY
         let menuBarHeight = window.frame.height
 
-        if let cameraSafeRightArea = screen.auxiliaryTopRightArea,
-           let cameraSafeLeftArea = screen.auxiliaryTopLeftArea,
-           !cameraSafeRightArea.isEmpty,
-           !cameraSafeLeftArea.isEmpty {
-            let notchLeftEdge = notchReservedRange?.lowerBound
-                ?? cameraSafeLeftArea.maxX
-            let notchRightEdge = notchReservedRange?.upperBound
-                ?? cameraSafeRightArea.minX
-            rightStripFrame = stripFrame(
-                left: notchRightEdge + 8,
-                right: menuExtraBoundary - 4,
-                y: menuBarY,
-                height: menuBarHeight
-            )
+        let hasCameraSafeAreas = screen.auxiliaryTopRightArea?.isEmpty == false
+            && screen.auxiliaryTopLeftArea?.isEmpty == false
+        let cameraSafeLeftArea = screen.auxiliaryTopLeftArea
+        let cameraSafeRightArea = screen.auxiliaryTopRightArea
+        let centerGap: ClosedRange<CGFloat>
+        if hasCameraSafeAreas, let cameraSafeLeftArea, let cameraSafeRightArea {
+            centerGap = (notchReservedRange?.lowerBound ?? cameraSafeLeftArea.maxX)
+                ... (notchReservedRange?.upperBound ?? cameraSafeRightArea.minX)
+        } else {
+            centerGap = screen.frame.midX ... screen.frame.midX
+        }
+        let centerPadding: CGFloat = centerGap.lowerBound == centerGap.upperBound ? 0 : 8
 
-            if let applicationMenuRightEdge {
+        switch model.menuBarLyricsLeftLayout {
+        case .automatic:
+            if hasCameraSafeAreas,
+               let cameraSafeLeftArea,
+               let applicationMenuRightEdge {
                 leftStripFrame = stripFrame(
                     left: max(applicationMenuRightEdge + 8, cameraSafeLeftArea.minX + 8),
-                    right: notchLeftEdge - 8,
+                    right: centerGap.lowerBound - 8,
                     y: menuBarY,
                     height: menuBarHeight
                 )
@@ -327,18 +366,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 // where another app's File/Edit/View menus end.
                 leftStripFrame = .zero
             }
-        } else {
-            leftStripFrame = .zero
-            rightStripFrame = stripFrame(
-                left: screen.frame.midX + 8,
-                right: menuExtraBoundary - 4,
+        case .fixed:
+            let leftLaneRightEdge = centerGap.lowerBound - centerPadding
+            leftStripFrame = stripFrame(
+                left: max(
+                    screen.frame.minX,
+                    leftLaneRightEdge - model.fixedMenuBarLyricsLeftWidth
+                ),
+                right: leftLaneRightEdge,
                 y: menuBarY,
                 height: menuBarHeight
             )
         }
 
-        apply(frame: leftStripFrame, to: leftStripPanel, view: leftMarqueeView)
-        apply(frame: rightStripFrame, to: rightStripPanel, view: rightMarqueeView)
+        switch model.menuBarLyricsRightLayout {
+        case .automatic:
+            rightStripFrame = stripFrame(
+                left: centerGap.upperBound + 8,
+                right: menuExtraBoundary - 4,
+                y: menuBarY,
+                height: menuBarHeight
+            )
+        case .fixed:
+            let rightLaneLeftEdge = centerGap.upperBound + centerPadding
+            rightStripFrame = stripFrame(
+                left: rightLaneLeftEdge,
+                right: min(
+                    screen.frame.maxX,
+                    rightLaneLeftEdge + model.fixedMenuBarLyricsRightWidth
+                ),
+                y: menuBarY,
+                height: menuBarHeight
+            )
+        }
+
+        apply(
+            frame: leftStripFrame,
+            to: leftStripPanel,
+            backdrop: leftStripBackdrop,
+            view: leftMarqueeView,
+            coversMenuBarItems: model.menuBarLyricsLeftLayout == .fixed
+        )
+        apply(
+            frame: rightStripFrame,
+            to: rightStripPanel,
+            backdrop: rightStripBackdrop,
+            view: rightMarqueeView,
+            coversMenuBarItems: model.menuBarLyricsRightLayout == .fixed
+        )
 
         let combinedWidth = leftStripFrame.width + rightStripFrame.width
         leftMarqueeView.setVirtualViewport(originX: 0, totalWidth: combinedWidth)
@@ -359,24 +434,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return NSRect(x: left, y: y, width: width, height: height)
     }
 
-    private func apply(frame: NSRect, to panel: NSPanel, view: MarqueeStatusView) {
+    private func apply(
+        frame: NSRect,
+        to panel: NSPanel,
+        backdrop: MenuBarBackdropView,
+        view: MarqueeStatusView,
+        coversMenuBarItems: Bool
+    ) {
+        backdrop.isHidden = !coversMenuBarItems
         guard !frame.isEmpty else {
             panel.orderOut(nil)
             return
         }
         panel.setFrame(frame, display: true)
+        backdrop.frame = NSRect(origin: .zero, size: frame.size)
         view.frame = NSRect(origin: .zero, size: frame.size)
         view.updateLayerLayout()
     }
 
     private func syncMenuBarAppearance() {
         guard let appearance = statusItem.button?.effectiveAppearance else { return }
-        for (panel, view) in [
-            (leftStripPanel, leftMarqueeView),
-            (rightStripPanel, rightMarqueeView),
+        for (panel, backdrop, view) in [
+            (leftStripPanel, leftStripBackdrop, leftMarqueeView),
+            (rightStripPanel, rightStripBackdrop, rightMarqueeView),
         ] {
             guard view.appearance?.name != appearance.name else { continue }
             panel?.appearance = appearance
+            backdrop?.appearance = appearance
+            backdrop?.needsDisplay = true
             view.appearance = appearance
             view.needsDisplay = true
         }
@@ -576,6 +661,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return nil
         }
         return CGRect(origin: position, size: size)
+    }
+}
+
+/// Uses AppKit's own status-item renderer so an overlapping lyric lane has
+/// the same dynamic background pattern as the system menu bar. This avoids
+/// reducing the translucent menu bar to a single sampled color.
+@MainActor
+private final class MenuBarBackdropView: NSView {
+    private let materialView = NSVisualEffectView(frame: .zero)
+    private let patternView: MenuBarPatternView
+
+    init(statusItem: NSStatusItem) {
+        patternView = MenuBarPatternView(statusItem: statusItem)
+        super.init(frame: .zero)
+
+        // The system status-bar pattern is intentionally translucent. Blur
+        // the real items first so their labels cannot remain legible beneath
+        // the lyrics, then draw AppKit's menu-bar pattern over that material.
+        materialView.material = .titlebar
+        materialView.blendingMode = .behindWindow
+        materialView.state = .active
+        addSubview(materialView)
+        addSubview(patternView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        materialView.frame = bounds
+        patternView.frame = bounds
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        patternView.needsDisplay = true
+    }
+}
+
+@MainActor
+private final class MenuBarPatternView: NSView {
+    private typealias DrawStatusBarBackground = @convention(c) (
+        AnyObject,
+        Selector,
+        NSRect,
+        Bool
+    ) -> Void
+
+    private static let drawBackgroundSelector = NSSelectorFromString(
+        "drawStatusBarBackgroundInRect:withHighlight:"
+    )
+    private let statusItem: NSStatusItem
+
+    init(statusItem: NSStatusItem) {
+        self.statusItem = statusItem
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let selector = Self.drawBackgroundSelector
+        guard statusItem.responds(to: selector) else { return }
+        let drawBackground = unsafeBitCast(
+            statusItem.method(for: selector),
+            to: DrawStatusBarBackground.self
+        )
+        drawBackground(statusItem, selector, bounds, false)
     }
 }
 
