@@ -402,6 +402,19 @@ final class AppModel: ObservableObject {
     }
 
     private func readCurrentPlayerState() async -> PlayerState {
+        let systemState = await systemPlayer.currentState()
+        let systemNativePlayer = SystemNowPlayingPlayer.nativePlayerKind(
+            bundleIdentifier: systemState.bundleIdentifier,
+            sourceName: systemState.sourceName
+        )
+        if systemNativePlayer == .appleMusic,
+           systemState.trackID != nil,
+           systemState.status == .playing
+        {
+            activePlayer = .appleMusic
+            return appleMusicState(from: systemState)
+        }
+
         var fallback: PlayerState?
         var pausedCandidate: (player: PlayerKind, state: PlayerState)?
         var candidates: [PlayerKind] = []
@@ -442,11 +455,7 @@ final class AppModel: ObservableObject {
             }
         }
 
-        let systemState = await systemPlayer.currentState()
-        let representsNativePlayer = SystemNowPlayingPlayer.isNativePlayer(
-            bundleIdentifier: systemState.bundleIdentifier,
-            sourceName: systemState.sourceName
-        )
+        let representsNativePlayer = systemNativePlayer != nil
         if !representsNativePlayer,
            systemState.trackID != nil,
            systemState.status == .playing
@@ -465,6 +474,14 @@ final class AppModel: ObservableObject {
             return systemState
         }
 
+        if systemNativePlayer == .appleMusic,
+           systemState.trackID != nil,
+           systemState.status == .paused
+        {
+            activePlayer = .appleMusic
+            return appleMusicState(from: systemState)
+        }
+
         if let pausedCandidate {
             activePlayer = pausedCandidate.player
             return pausedCandidate.state
@@ -475,6 +492,23 @@ final class AppModel: ObservableObject {
             return fallback ?? systemState
         }
         return fallback ?? .stopped
+    }
+
+    private func appleMusicState(from state: PlayerState) -> PlayerState {
+        let identity = state.catalogID ?? state.trackID ?? ""
+        return PlayerState(
+            status: state.status,
+            player: .appleMusic,
+            trackID: identity.isEmpty ? nil : "apple-music:\(identity)",
+            positionMs: state.positionMs,
+            title: state.title,
+            artist: state.artist,
+            album: state.album,
+            durationMs: state.durationMs,
+            catalogID: state.catalogID,
+            sourceName: state.sourceName,
+            bundleIdentifier: state.bundleIdentifier
+        )
     }
 
     private func isRunning(_ player: PlayerKind) -> Bool {
@@ -557,7 +591,8 @@ final class AppModel: ObservableObject {
                         durationMs: playerState.durationMs,
                         artist: playerState.artist,
                         album: playerState.album,
-                        plainLyrics: appleMusicPlainLyrics
+                        plainLyrics: appleMusicPlainLyrics,
+                        catalogID: playerState.catalogID
                     ) {
                         guard !Task.isCancelled, playerState.trackID == trackID else { return }
                         install(cached, source: .appleMusicCache)

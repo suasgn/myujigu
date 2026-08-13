@@ -14,6 +14,7 @@ public struct SystemNowPlayingPlayer: Sendable {
         let calculatedPosition: Double?
         let playbackRate: Double?
         let uniqueIdentifier: String?
+        let storeIdentifier: String?
         let mediaType: String?
         let appName: String?
         let bundleIdentifier: String?
@@ -70,6 +71,7 @@ public struct SystemNowPlayingPlayer: Sendable {
             calculatedPosition: calculatedPosition,
             playbackRate: value('kMRMediaRemoteNowPlayingInfoPlaybackRate'),
             uniqueIdentifier: text(value('kMRMediaRemoteNowPlayingInfoUniqueIdentifier')),
+            storeIdentifier: text(value('kMRMediaRemoteNowPlayingInfoiTunesStoreIdentifier')),
             mediaType: value('kMRMediaRemoteNowPlayingInfoMediaType'),
             appName: property(client, 'displayName'),
             bundleIdentifier: property(client, 'bundleIdentifier')
@@ -188,6 +190,19 @@ public struct SystemNowPlayingPlayer: Sendable {
             album,
             String(durationMs),
         ].joined(separator: String(Character(UnicodeScalar(31))))
+        let rawCatalogID = snapshot.storeIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // MediaRemote stores numeric values in NSNumber. JXA stringifies
+        // those as ordinary decimal identifiers before JSON encoding.
+        let catalogID: String? = if let rawCatalogID,
+                                    !rawCatalogID.isEmpty,
+                                    rawCatalogID != "0",
+                                    rawCatalogID.allSatisfy(\.isNumber)
+        {
+            rawCatalogID
+        } else {
+            nil
+        }
 
         return PlayerState(
             status: (snapshot.playbackRate ?? 0) > 0 ? .playing : .paused,
@@ -198,6 +213,7 @@ public struct SystemNowPlayingPlayer: Sendable {
             artist: artist,
             album: album,
             durationMs: durationMs,
+            catalogID: catalogID,
             sourceName: sourceName?.isEmpty == false ? sourceName : nil,
             bundleIdentifier: bundleIdentifier?.isEmpty == false ? bundleIdentifier : nil
         )
@@ -207,12 +223,31 @@ public struct SystemNowPlayingPlayer: Sendable {
         bundleIdentifier: String?,
         sourceName: String?
     ) -> Bool {
+        nativePlayerKind(
+            bundleIdentifier: bundleIdentifier,
+            sourceName: sourceName
+        ) != nil
+    }
+
+    public static func nativePlayerKind(
+        bundleIdentifier: String?,
+        sourceName: String?
+    ) -> PlayerKind? {
         let bundleIdentifier = bundleIdentifier?.lowercased() ?? ""
-        if bundleIdentifier == "com.spotify.client" || bundleIdentifier == "com.apple.music" {
-            return true
+        if bundleIdentifier == "com.spotify.client" {
+            return .spotify
+        }
+        if bundleIdentifier == "com.apple.music" {
+            return .appleMusic
         }
         let sourceName = sourceName?.lowercased() ?? ""
-        return sourceName == "spotify" || sourceName == "music" || sourceName == "apple music"
+        if sourceName == "spotify" {
+            return .spotify
+        }
+        if sourceName == "music" || sourceName == "apple music" {
+            return .appleMusic
+        }
+        return nil
     }
 
     private static func milliseconds(_ seconds: Double?) -> Int {

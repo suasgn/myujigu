@@ -92,6 +92,7 @@ final class MyujiguCoreTests: XCTestCase {
           "calculatedPosition": 21.25,
           "playbackRate": 1,
           "uniqueIdentifier": "browser-track-1",
+          "storeIdentifier": "1476727864",
           "mediaType": "Audio",
           "appName": "Test Browser",
           "bundleIdentifier": "com.example.browser"
@@ -105,6 +106,7 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(state.durationMs, 193_091)
         XCTAssertEqual(state.title, "Browser Song")
         XCTAssertEqual(state.artist, "Test Artist")
+        XCTAssertEqual(state.catalogID, "1476727864")
         XCTAssertEqual(state.sourceName, "Test Browser")
         XCTAssertEqual(state.bundleIdentifier, "com.example.browser")
         XCTAssertTrue(try XCTUnwrap(state.trackID).hasPrefix("now-playing:"))
@@ -488,6 +490,68 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(
             lyrics?.lines.map(\.words),
             ["Knew he was a killer first time that I saw him"]
+        )
+    }
+
+    func testAppleMusicCacheMatchesCatalogIDWithGenericVocalCredit() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let ttml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml"
+            xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xml:lang="en">
+          <head><metadata>
+            <ttm:agent type="person" xml:id="v1">
+              <ttm:name type="full">Vocal 1</ttm:name>
+            </ttm:agent>
+            <iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal">
+              <songwriters>
+                <songwriter>Stefani J. Germanotta</songwriter>
+                <songwriter>Nadir Khayat</songwriter>
+              </songwriters>
+            </iTunesMetadata>
+          </metadata></head>
+          <body dur="3:57.078"><div>
+            <p begin="24.393" end="27.878">A recently fetched synchronized line</p>
+          </div></body>
+        </tt>
+        """#
+        let payload = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
+        let payloadHex = payload.map { String(format: "%02X", $0) }.joined()
+        let database = directory.appendingPathComponent("Cache.db")
+        let query = """
+        CREATE TABLE cfurl_cache_response(
+          entry_ID INTEGER PRIMARY KEY,
+          request_key TEXT,
+          time_stamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB);
+        INSERT INTO cfurl_cache_response(entry_ID, request_key)
+          VALUES(1, 'https://se2.itunes.apple.com/ttmlLyrics?id=1476727864');
+        INSERT INTO cfurl_cache_receiver_data VALUES(1, 0, X'\(payloadHex)');
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [database.path, query]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let cache = AppleMusicLyricsCache(cacheDirectory: directory)
+        let lyrics = await cache.findLyrics(
+            title: "Poker Face",
+            durationMs: 237_078,
+            artist: "Lady Gaga",
+            album: "The Fame Monster (Deluxe Edition)",
+            catalogID: "1476727864"
+        )
+        XCTAssertEqual(
+            lyrics?.lines.map(\.words),
+            ["A recently fetched synchronized line"]
         )
     }
 

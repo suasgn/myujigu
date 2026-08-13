@@ -780,6 +780,11 @@ private final class MarqueeStatusView: NSView {
     private let pointsPerSecond: CGFloat = 30
     private let repeatGap: CGFloat = 20
     private let timelineStartFraction: CGFloat = 0.5
+    private let driftCorrectionWindowMs: Double = 2_000
+    private let driftCorrectionDeadbandMs: Double = 50
+    private let pausedResyncDriftMs: Double = 150
+    private let hardResyncDriftMs: Double = 750
+    private let maximumPlaybackRateCorrection: Double = 0.1
     private let clipLayer = CALayer()
     private let movingLayer = CALayer()
     private let noteLayer = CATextLayer()
@@ -796,6 +801,8 @@ private final class MarqueeStatusView: NSView {
     private var timelineIsPlaying = false
     private var animationAnchorPositionMs: Double = 0
     private var animationAnchorMediaTime = CACurrentMediaTime()
+    private var timelinePlaybackRate: Double = 1
+    private var appliedTimelinePlaybackRate: Double = 0
     private var virtualViewportOriginX: CGFloat = 0
     private var virtualViewportWidth: CGFloat = 0
     private var cachedTextSize: NSSize?
@@ -941,11 +948,13 @@ private final class MarqueeStatusView: NSView {
         let wasPlaying = timelineIsPlaying
         let now = CACurrentMediaTime()
         let expectedPositionMs = animationAnchorPositionMs
-            + (wasPlaying ? (now - animationAnchorMediaTime) * 1_000 : 0)
-        timelinePositionMs = Double(positionMs)
+            + (now - animationAnchorMediaTime) * 1_000 * appliedTimelinePlaybackRate
+        let reportedPositionMs = Double(positionMs)
         timelineIsPlaying = isPlaying
 
         if shouldRebuild {
+            timelinePositionMs = reportedPositionMs
+            timelinePlaybackRate = 1
             timelineTrackID = trackID
             timelineTitle = normalizedTitle
             timelineArtist = normalizedArtist
@@ -956,9 +965,34 @@ private final class MarqueeStatusView: NSView {
             rebuildMotionAnimation()
         } else if !timelineSegments.isEmpty {
             let playbackChanged = wasPlaying != isPlaying
-            let positionDrifted = abs(expectedPositionMs - timelinePositionMs) >= 150
-            if playbackChanged || positionDrifted {
+            let driftMs = reportedPositionMs - expectedPositionMs
+
+            if playbackChanged
+                || abs(driftMs) >= hardResyncDriftMs
+                || (!isPlaying && abs(driftMs) >= pausedResyncDriftMs)
+            {
+                // Playback changes and seeks should take effect immediately.
+                timelinePositionMs = reportedPositionMs
+                timelinePlaybackRate = 1
                 rebuildMotionAnimation()
+            } else if isPlaying {
+                // Keep the current presentation position and gently change the
+                // Core Animation clock until it converges with the player.
+                // No Swift/AppKit work is performed for individual frames.
+                timelinePositionMs = expectedPositionMs
+                let correction = abs(driftMs) < driftCorrectionDeadbandMs
+                    ? 0
+                    : min(
+                        max(
+                            driftMs / driftCorrectionWindowMs,
+                            -maximumPlaybackRateCorrection
+                        ),
+                        maximumPlaybackRateCorrection
+                    )
+                timelinePlaybackRate = 1 + correction
+                applyTimelinePlaybackRate(timelinePlaybackRate, at: now)
+            } else {
+                timelinePositionMs = expectedPositionMs
             }
         }
     }
@@ -1149,6 +1183,8 @@ private final class MarqueeStatusView: NSView {
 
     private func installTimelineAnimation() {
         guard let lastSegment = timelineSegments.last else { return }
+        let desiredPlaybackRate = timelineIsPlaying ? timelinePlaybackRate : 0
+        resetLayerClock()
         let lyricEndTimeMs = max(lastSegment.endTimeMs, 1)
         // Keep the animation alive at its final, fully-offscreen value until
         // the track changes. Ending the CA animation at the last lyric allowed
@@ -1193,7 +1229,7 @@ private final class MarqueeStatusView: NSView {
         )
         animation.beginTime = movingLayer.convertTime(mediaTime, from: nil)
         animation.timeOffset = positionSeconds
-        animation.speed = timelineIsPlaying ? 1 : 0
+        animation.speed = 1
 
         withoutImplicitAnimations {
             movingLayer.setAffineTransform(
@@ -1203,10 +1239,13 @@ private final class MarqueeStatusView: NSView {
         movingLayer.add(animation, forKey: "lyricMotion")
         animationAnchorPositionMs = positionSeconds * 1_000
         animationAnchorMediaTime = mediaTime
+        appliedTimelinePlaybackRate = 1
+        applyTimelinePlaybackRate(desiredPlaybackRate, at: mediaTime)
     }
 
     private func installFallbackAnimation() {
         resetLayerClock()
+        appliedTimelinePlaybackRate = 0
         let start = -virtualViewportOriginX
         guard textSize.width > availableTextWidth else {
             repeatedFallbackLayer.isHidden = true
@@ -1229,6 +1268,31 @@ private final class MarqueeStatusView: NSView {
             movingLayer.setAffineTransform(CGAffineTransform(translationX: start, y: 0))
         }
         movingLayer.add(animation, forKey: "lyricMotion")
+    }
+
+    private func applyTimelinePlaybackRate(
+        _ playbackRate: Double,
+        at mediaTime: CFTimeInterval
+    ) {
+        guard abs(appliedTimelinePlaybackRate - playbackRate) > 0.0001 else { return }
+
+        let currentPositionMs = animationAnchorPositionMs
+            + (mediaTime - animationAnchorMediaTime) * 1_000 * appliedTimelinePlaybackRate
+        let localTime = movingLayer.convertTime(mediaTime, from: nil)
+        let parentTime = movingLayer.superlayer?.convertTime(mediaTime, from: nil)
+            ?? mediaTime
+
+        withoutImplicitAnimations {
+            // Rebase the layer's local clock before changing its rate so its
+            // presentation value remains continuous at this exact instant.
+            movingLayer.beginTime = parentTime
+            movingLayer.timeOffset = localTime
+            movingLayer.speed = Float(playbackRate)
+        }
+
+        animationAnchorPositionMs = currentPositionMs
+        animationAnchorMediaTime = mediaTime
+        appliedTimelinePlaybackRate = playbackRate
     }
 
     private func resetLayerClock() {

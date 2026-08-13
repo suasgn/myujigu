@@ -80,6 +80,7 @@ public struct PlayerState: Equatable, Sendable {
     public let artist: String
     public let album: String
     public let durationMs: Int
+    public let catalogID: String?
     public let artworkURL: URL?
     public let sourceName: String?
     public let bundleIdentifier: String?
@@ -107,6 +108,7 @@ public struct PlayerState: Equatable, Sendable {
         artist: String,
         album: String = "",
         durationMs: Int = 0,
+        catalogID: String? = nil,
         artworkURL: URL? = nil,
         sourceName: String? = nil,
         bundleIdentifier: String? = nil
@@ -119,6 +121,7 @@ public struct PlayerState: Equatable, Sendable {
         self.artist = artist
         self.album = album
         self.durationMs = durationMs
+        self.catalogID = catalogID
         self.artworkURL = artworkURL
         self.sourceName = sourceName
         self.bundleIdentifier = bundleIdentifier

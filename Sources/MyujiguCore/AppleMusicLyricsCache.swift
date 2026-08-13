@@ -255,7 +255,8 @@ public actor AppleMusicLyricsCache {
         durationMs: Int,
         artist: String = "",
         album: String = "",
-        plainLyrics: String? = nil
+        plainLyrics: String? = nil,
+        catalogID: String? = nil
     ) -> Lyrics? {
         let normalizedTitle = normalize(title)
         guard !normalizedTitle.isEmpty else { return nil }
@@ -270,6 +271,12 @@ public actor AppleMusicLyricsCache {
                document.durationMs > durationMs + 3_000
             {
                 continue
+            }
+
+            if let catalogID,
+               self.catalogID(in: response.requestKey) == catalogID
+            {
+                return document.lyrics
             }
 
             if !document.title.isEmpty, normalize(document.title) == normalizedTitle {
@@ -287,7 +294,7 @@ public actor AppleMusicLyricsCache {
 
             candidates.append(
                 LyricsCandidate(
-                    catalogID: catalogID(in: response.requestKey),
+                    catalogID: self.catalogID(in: response.requestKey),
                     document: document
                 )
             )
