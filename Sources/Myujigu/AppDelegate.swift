@@ -120,9 +120,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                         title: state.title,
                         artist: state.artist,
                         positionMs: state.positionMs,
-                        isPlaying: state.status == .playing
+                        isPlaying: state.status == .playing,
+                        highlightColor: self.model.mainThemeColor
                     )
                 }
+            }
+            .store(in: &cancellables)
+
+        model.$liveWordHighlight
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] highlight in
+                guard let self else { return }
+                self.leftMarqueeView.updateKaraokeHighlight(highlight)
+                self.rightMarqueeView.updateKaraokeHighlight(highlight)
             }
             .store(in: &cancellables)
 
@@ -745,6 +756,7 @@ private final class MenuBarPatternView: NSView {
 @MainActor
 private final class MarqueeStatusView: NSView {
     private struct TimelineSegment {
+        let lineIndex: Int
         let text: String
         let startTimeMs: Int
         let endTimeMs: Int
@@ -796,6 +808,13 @@ private final class MarqueeStatusView: NSView {
     private var timelineTitle = ""
     private var timelineArtist = ""
     private var timelineLyrics: Lyrics?
+    private var liveWordHighlight: LiveWordHighlight?
+    private var karaokeHighlightColor = NSColor(
+        srgbRed: 0.16,
+        green: 0.74,
+        blue: 0.45,
+        alpha: 1
+    )
     private var timelineSegments: [TimelineSegment] = []
     private var timelinePositionMs: Double = 0
     private var timelineIsPlaying = false
@@ -937,8 +956,10 @@ private final class MarqueeStatusView: NSView {
         title: String,
         artist: String,
         positionMs: Int,
-        isPlaying: Bool
+        isPlaying: Bool,
+        highlightColor: NSColor
     ) {
+        updateKaraokeHighlightColor(highlightColor)
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldRebuild = timelineTrackID != trackID
@@ -994,6 +1015,28 @@ private final class MarqueeStatusView: NSView {
             } else {
                 timelinePositionMs = expectedPositionMs
             }
+        }
+    }
+
+    func updateKaraokeHighlight(_ highlight: LiveWordHighlight?) {
+        guard liveWordHighlight != highlight else { return }
+        let affectedLines = Set([liveWordHighlight?.lineIndex, highlight?.lineIndex].compactMap { $0 })
+        liveWordHighlight = highlight
+        for (index, segment) in timelineSegments.enumerated()
+            where affectedLines.contains(segment.lineIndex)
+        {
+            configureTimelineLayer(timelineTextLayers[index], for: segment)
+        }
+    }
+
+    private func updateKaraokeHighlightColor(_ color: NSColor) {
+        guard !karaokeHighlightColor.isEqual(color) else { return }
+        karaokeHighlightColor = color
+        guard let lineIndex = liveWordHighlight?.lineIndex else { return }
+        for (index, segment) in timelineSegments.enumerated()
+            where segment.lineIndex == lineIndex
+        {
+            configureTimelineLayer(timelineTextLayers[index], for: segment)
         }
     }
 
@@ -1066,7 +1109,7 @@ private final class MarqueeStatusView: NSView {
             configure(titleIntroLayer, text: titleIntroText, attributes: textAttributes)
         }
         for (segment, textLayer) in zip(timelineSegments, timelineTextLayers) {
-            configure(textLayer, text: segment.text, attributes: textAttributes)
+            configureTimelineLayer(textLayer, for: segment)
         }
     }
 
@@ -1092,16 +1135,64 @@ private final class MarqueeStatusView: NSView {
             // CATextLayer stores a fixed CGColor, so resolve AppKit's semantic
             // label color in this view's menu-bar appearance rather than the
             // app-wide appearance active on the current thread.
-            var resolvedColor: CGColor?
-            effectiveAppearance.performAsCurrentDrawingAppearance {
-                resolvedColor = color.cgColor
-            }
-            textLayer.foregroundColor = resolvedColor
+            textLayer.foregroundColor = resolvedMenuBarColor(color).cgColor
             textLayer.alignmentMode = .left
             textLayer.isWrapped = false
             textLayer.truncationMode = .none
             textLayer.contentsScale = contentsScale
         }
+    }
+
+    private func configureTimelineLayer(
+        _ textLayer: CATextLayer,
+        for segment: TimelineSegment
+    ) {
+        guard let highlight = liveWordHighlight,
+              highlight.lineIndex == segment.lineIndex
+        else {
+            configure(textLayer, text: segment.text, attributes: textAttributes)
+            return
+        }
+
+        let range = NSRange(
+            location: highlight.utf16Offset,
+            length: highlight.utf16Length
+        )
+        let stringLength = (segment.text as NSString).length
+        guard range.location >= 0, NSMaxRange(range) <= stringLength else {
+            configure(textLayer, text: segment.text, attributes: textAttributes)
+            return
+        }
+
+        let attributed = NSMutableAttributedString(
+            string: segment.text,
+            attributes: [
+                .font: textFont,
+                .foregroundColor: resolvedMenuBarColor(.labelColor),
+            ]
+        )
+        attributed.addAttributes(
+            [
+                .foregroundColor: resolvedMenuBarColor(karaokeHighlightColor),
+            ],
+            range: range
+        )
+
+        withoutImplicitAnimations {
+            textLayer.string = attributed
+            textLayer.alignmentMode = .left
+            textLayer.isWrapped = false
+            textLayer.truncationMode = .none
+            textLayer.contentsScale = contentsScale
+        }
+    }
+
+    private func resolvedMenuBarColor(_ color: NSColor) -> NSColor {
+        var resolved = color
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = NSColor(cgColor: color.cgColor) ?? color
+        }
+        return resolved
     }
 
     private var contentsScale: CGFloat {
@@ -1126,16 +1217,18 @@ private final class MarqueeStatusView: NSView {
             return
         }
 
-        let usableLines = lyrics.lines.filter {
-            !$0.words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let usableLines = lyrics.lines.enumerated().filter {
+            !$0.element.words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         var cursor: CGFloat = 0
-        timelineSegments = usableLines.enumerated().map { index, line in
+        timelineSegments = usableLines.enumerated().map { index, indexedLine in
             let suffix = index + 1 < usableLines.count ? "   •   " : ""
+            let line = indexedLine.element
             let value = line.words + suffix
             let width = (value as NSString).size(withAttributes: textAttributes).width
             defer { cursor += width }
             return TimelineSegment(
+                lineIndex: indexedLine.offset,
                 text: value,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
@@ -1152,7 +1245,7 @@ private final class MarqueeStatusView: NSView {
         timelineTextLayers.forEach { $0.removeFromSuperlayer() }
         timelineTextLayers = timelineSegments.map { segment in
             let textLayer = CATextLayer()
-            configure(textLayer, text: segment.text, attributes: textAttributes)
+            configureTimelineLayer(textLayer, for: segment)
             movingLayer.addSublayer(textLayer)
             return textLayer
         }

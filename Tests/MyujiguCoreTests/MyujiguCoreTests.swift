@@ -36,6 +36,46 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertNil(lyrics.activeLineIndex(at: 5_000))
     }
 
+    func testKaraokeTimelineEstimatesEveryWordWithinTheLine() throws {
+        let lyrics = Lyrics(
+            syncType: "LINE_SYNCED",
+            lines: [
+                LyricLine(startTimeMs: 0, endTimeMs: 4_000, words: "one two three"),
+            ]
+        )
+
+        let timeline = KaraokeWordTimeline(lyrics: lyrics)
+        XCTAssertFalse(timeline.usesProviderWordTiming)
+        XCTAssertEqual(timeline.cues.map(\.highlight.utf16Offset), [0, 4, 8])
+        XCTAssertEqual(timeline.cues.first?.startTimeMs, 0)
+        XCTAssertEqual(timeline.cues.last?.endTimeMs, 4_000)
+        XCTAssertEqual(timeline.highlight(at: 0)?.utf16Offset, 0)
+    }
+
+    func testKaraokeTimelinePrefersProviderSyllableTiming() throws {
+        let lyrics = Lyrics(
+            syncType: "LINE_SYNCED",
+            lines: [
+                LyricLine(
+                    startTimeMs: 1_000,
+                    endTimeMs: 3_000,
+                    words: "Hello world",
+                    syllables: [
+                        Syllable(startTimeMs: 1_000, count: 5),
+                        Syllable(startTimeMs: 1_800, count: 6),
+                    ]
+                ),
+            ]
+        )
+
+        let timeline = KaraokeWordTimeline(lyrics: lyrics)
+        XCTAssertTrue(timeline.usesProviderWordTiming)
+        XCTAssertEqual(timeline.cues.map(\.startTimeMs), [1_000, 1_800])
+        XCTAssertEqual(timeline.highlight(at: 1_799)?.utf16Offset, 0)
+        XCTAssertEqual(timeline.highlight(at: 1_800)?.utf16Offset, 6)
+        XCTAssertEqual(timeline.nextTransitionTime(after: 1_000), 1_800)
+    }
+
     func testSpotifyLyricsCacheKeyExtractsOnlyTheTrackID() {
         let key = "1/0/_dk_https://spotify.com https://spotify.com "
             + "https://spclient.wg.spotify.com/color-lyrics/v2/track/abc123/image/cover"
@@ -243,6 +283,27 @@ final class MyujiguCoreTests: XCTestCase {
         XCTAssertEqual(document.lyrics.lines[1].startTimeMs, 4_000)
         XCTAssertEqual(document.lyrics.lines[1].endTimeMs, 8_500)
         XCTAssertEqual(document.lyrics.lines[1].words, "Second test line")
+    }
+
+    func testAppleMusicTTMLParserKeepsProviderWordTiming() throws {
+        let ttml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml"
+            xmlns:itunes="http://itunes.apple.com/lyric-ttml-extensions"
+            xml:lang="en-US" itunes:timing="Word">
+          <body dur="00:00:04.000"><div>
+            <p begin="00:00:01.000" end="00:00:03.000"><span begin="00:00:01.000">Hello</span> <span begin="00:00:01.800">world</span></p>
+          </div></body>
+        </tt>
+        """#
+        let data = try JSONSerialization.data(withJSONObject: ["ttml": ttml])
+        let lyrics = try XCTUnwrap(AppleMusicLyricsParser.parse(data))
+
+        XCTAssertEqual(lyrics.lines[0].words, "Hello world")
+        XCTAssertEqual(lyrics.lines[0].syllables.map(\.startTimeMs), [1_000, 1_800])
+        XCTAssertEqual(lyrics.lines[0].syllables.map(\.count), [5, 6])
+        let timeline = KaraokeWordTimeline(lyrics: lyrics)
+        XCTAssertTrue(timeline.usesProviderWordTiming)
+        XCTAssertEqual(timeline.highlight(at: 1_800)?.utf16Offset, 6)
     }
 
     func testAppleMusicParsesBareDecimalSecondsBeforeOneMinute() throws {

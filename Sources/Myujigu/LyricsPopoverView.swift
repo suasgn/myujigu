@@ -244,6 +244,9 @@ struct LyricsPopoverView: View {
                         lyrics: lyrics,
                         activeIndex: model.activeLineIndex,
                         positionMs: model.playerState.positionMs,
+                        liveHighlight: model.realtimeWordHighlightingEnabled
+                            ? model.liveWordHighlight
+                            : nil,
                         accent: accent
                     )
                 } else {
@@ -262,12 +265,7 @@ struct LyricsPopoverView: View {
     }
 
     private var accent: Color {
-        switch model.playerState.player {
-        case .appleMusic: return Color(red: 0.98, green: 0.25, blue: 0.42)
-        case .spotify: return Color(red: 0.16, green: 0.74, blue: 0.45)
-        case .system: return Color(red: 0.39, green: 0.55, blue: 0.96)
-        case nil: return Color(red: 0.16, green: 0.74, blue: 0.45)
-        }
+        Color(nsColor: model.mainThemeColor)
     }
 
     private var playerSymbol: String {
@@ -447,7 +445,12 @@ private struct LyricsStage: View {
     let lyrics: Lyrics
     let activeIndex: Int?
     let positionMs: Int
+    let liveHighlight: LiveWordHighlight?
     let accent: Color
+
+    private var displayedActiveIndex: Int? {
+        liveHighlight?.lineIndex ?? activeIndex
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -456,9 +459,12 @@ private struct LyricsStage: View {
                     ForEach(Array(lyrics.lines.enumerated()), id: \.offset) { index, line in
                         StageLyricLine(
                             line: line,
-                            isActive: index == activeIndex,
-                            hasPassed: index < (activeIndex ?? 0),
+                            isActive: index == displayedActiveIndex,
+                            hasPassed: index < (displayedActiveIndex ?? 0),
                             positionMs: positionMs,
+                            liveHighlight: liveHighlight?.lineIndex == index
+                                ? liveHighlight
+                                : nil,
                             accent: accent
                         )
                         .id(index)
@@ -473,6 +479,9 @@ private struct LyricsStage: View {
                 }
             }
             .onChange(of: activeIndex) { _ in
+                scrollToActiveLine(with: proxy, animated: true)
+            }
+            .onChange(of: liveHighlight?.lineIndex) { _ in
                 scrollToActiveLine(with: proxy, animated: true)
             }
         }
@@ -491,7 +500,7 @@ private struct LyricsStage: View {
     }
 
     private func scrollToActiveLine(with proxy: ScrollViewProxy, animated: Bool) {
-        guard let activeIndex else { return }
+        guard let activeIndex = displayedActiveIndex else { return }
         if animated {
             withAnimation(.easeInOut(duration: 0.32)) {
                 proxy.scrollTo(activeIndex, anchor: .center)
@@ -507,6 +516,7 @@ private struct StageLyricLine: View {
     let isActive: Bool
     let hasPassed: Bool
     let positionMs: Int
+    let liveHighlight: LiveWordHighlight?
     let accent: Color
 
     var body: some View {
@@ -543,6 +553,19 @@ private struct StageLyricLine: View {
     }
 
     private var karaokeText: Text {
+        if isActive, let liveHighlight {
+            let words = line.words as NSString
+            let range = NSRange(
+                location: liveHighlight.utf16Offset,
+                length: liveHighlight.utf16Length
+            )
+            if range.location >= 0, NSMaxRange(range) <= words.length {
+                return Text(words.substring(to: range.location))
+                    + Text(words.substring(with: range)).foregroundColor(accent)
+                    + Text(words.substring(from: NSMaxRange(range)))
+            }
+        }
+
         guard isActive, !line.syllables.isEmpty else {
             return Text(line.words)
         }
@@ -635,7 +658,7 @@ private struct SettingsView: View {
 
             settingsContent
         }
-        .frame(width: 540, height: 550)
+        .frame(width: 540, height: 680)
         .background(.ultraThinMaterial)
         .sheet(isPresented: $showingSpotifyLogin) {
             SpotifyLoginView { cookie in
@@ -736,6 +759,40 @@ private struct SettingsView: View {
                 .frame(height: 1)
                 .padding(.vertical, 18)
 
+            Text("REALTIME KARAOKE")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(1.2)
+                .foregroundStyle(.tertiary)
+
+            Toggle(isOn: $model.realtimeWordHighlightingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Highlight the current word")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Text("Uses provider word timing when available and estimates words within each synchronized line.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .padding(.top, 11)
+
+            Label(
+                model.realtimeKaraokeStatus.message,
+                systemImage: model.realtimeKaraokeStatus.isFollowingTiming
+                    ? "waveform.circle.fill"
+                    : "info.circle"
+            )
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(
+                model.realtimeKaraokeStatus.isFollowingTiming ? accent : Color.secondary
+            )
+            .padding(.top, 8)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+                .padding(.vertical, 18)
+
             Text("SPOTIFY")
                 .font(.system(size: 9, weight: .bold))
                 .tracking(1.2)
@@ -793,7 +850,7 @@ private struct SettingsView: View {
                 .foregroundStyle(accent)
                 .padding(.top, 12)
 
-            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify. For other players, track title, artist, album, and duration are sent to LRCLIB to find lyrics.")
+            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify. For other players, track metadata is sent to LRCLIB to find lyrics. Realtime Karaoke uses lyric timestamps locally and does not record system audio.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

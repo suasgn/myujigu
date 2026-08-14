@@ -33,10 +33,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var lyricsError: String?
     @Published private(set) var isLoadingLyrics = false
     @Published private(set) var activeLineIndex: Int?
+    @Published private(set) var liveWordHighlight: LiveWordHighlight?
+    @Published private(set) var realtimeKaraokeStatus: RealtimeKaraokeStatus = .disabled
     @Published private(set) var menuBarText = "Myujigu"
     @Published private(set) var showsMenuBarLyrics = false
     @Published private(set) var hasCredential = false
     @Published var settingsMessage: String?
+    @Published var realtimeWordHighlightingEnabled: Bool = UserDefaults.standard.bool(
+        forKey: "realtimeWordHighlightingEnabled"
+    ) {
+        didSet {
+            UserDefaults.standard.set(
+                realtimeWordHighlightingEnabled,
+                forKey: "realtimeWordHighlightingEnabled"
+            )
+            updateRealtimeKaraoke()
+        }
+    }
     @Published var menuBarLyricsLeftLayout: MenuBarLyricsLayout = {
         let defaults = UserDefaults.standard
         if let rawValue = defaults.string(forKey: "menuBarLyricsLeftLayout"),
@@ -126,6 +139,7 @@ final class AppModel: ObservableObject {
     private var lyricsTask: Task<Void, Never>?
     private var artworkTask: Task<Void, Never>?
     private var pauseVisibilityTask: Task<Void, Never>?
+    private var realtimeKaraoke: RealtimeKaraokeController?
     private let lyricsRetryNanoseconds: UInt64 = 3_000_000_000
     private let pauseHideDelayNanoseconds: UInt64 = 5_000_000_000
 
@@ -133,6 +147,14 @@ final class AppModel: ObservableObject {
         hasCredential = credentials.load() != nil
         artworkCache.countLimit = ArtworkCache.countLimit
         artworkCache.totalCostLimit = ArtworkCache.totalCostLimit
+        realtimeKaraoke = RealtimeKaraokeController(
+            statusHandler: { [weak self] status in
+                self?.realtimeKaraokeStatus = status
+            },
+            highlightHandler: { [weak self] highlight in
+                self?.liveWordHighlight = highlight
+            }
+        )
     }
 
     deinit {
@@ -162,6 +184,7 @@ final class AppModel: ObservableObject {
         artworkTask = nil
         pauseVisibilityTask?.cancel()
         pauseVisibilityTask = nil
+        realtimeKaraoke?.stop()
     }
 
     func send(_ command: SpotifyCommand) {
@@ -211,6 +234,19 @@ final class AppModel: ObservableObject {
     var currentLine: LyricLine? {
         guard let lyrics, let activeLineIndex, lyrics.lines.indices.contains(activeLineIndex) else { return nil }
         return lyrics.lines[activeLineIndex]
+    }
+
+    var mainThemeColor: NSColor {
+        switch playerState.player {
+        case .appleMusic:
+            return NSColor(srgbRed: 0.98, green: 0.25, blue: 0.42, alpha: 1)
+        case .spotify:
+            return NSColor(srgbRed: 0.16, green: 0.74, blue: 0.45, alpha: 1)
+        case .system:
+            return NSColor(srgbRed: 0.39, green: 0.55, blue: 0.96, alpha: 1)
+        case nil:
+            return NSColor(srgbRed: 0.16, green: 0.74, blue: 0.45, alpha: 1)
+        }
     }
 
     var playbackDescription: String {
@@ -267,6 +303,7 @@ final class AppModel: ObservableObject {
 
         updateActiveLine()
         updateMenuBarText()
+        updateRealtimeKaraoke()
     }
 
     private func updateMenuBarLyricsVisibility(
@@ -651,6 +688,7 @@ final class AppModel: ObservableObject {
         isLoadingLyrics = false
         lyricsError = message
         updateMenuBarText()
+        updateRealtimeKaraoke()
     }
 
     private func install(_ newLyrics: Lyrics, source: LyricsSource) {
@@ -660,6 +698,7 @@ final class AppModel: ObservableObject {
         isLoadingLyrics = false
         updateActiveLine()
         updateMenuBarText()
+        updateRealtimeKaraoke()
     }
 
     private func updateActiveLine() {
@@ -680,5 +719,18 @@ final class AppModel: ObservableObject {
         } else {
             menuBarText = ""
         }
+    }
+
+    private func updateRealtimeKaraoke() {
+        realtimeKaraoke?.update(
+            RealtimeKaraokeController.PlaybackContext(
+                enabled: realtimeWordHighlightingEnabled,
+                trackID: playerState.trackID,
+                isPlaying: playerState.status == .playing,
+                positionMs: playerState.positionMs,
+                lyrics: lyrics,
+                activeLineIndex: activeLineIndex
+            )
+        )
     }
 }

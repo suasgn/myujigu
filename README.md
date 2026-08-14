@@ -21,6 +21,7 @@ open Myujigu.xcodeproj
 - Follows other apps that publish playback metadata to macOS Now Playing
 - Uses camera-safe lyric lanes on MacBooks with a notch
 - Lets each side independently use automatic safe sizing or a fixed width from the center or notch
+- Optionally highlights the current word using synchronized lyric timing, with provider word timing when available
 - Reads cached lyrics first and keeps Spotify credentials in Keychain
 - Written in Swift and SwiftUI
 - macOS 13+
@@ -37,6 +38,8 @@ For a new Apple Music track that has not been cached yet, open the track's Lyric
 
 - **Automation** — required to read playback state and control Spotify or Music.
 - **Accessibility** — optional; used to measure the available menu-bar space beside the camera housing. Without it, Myujigu safely uses the right lyric lane only.
+
+Realtime Karaoke does not record system audio or require Speech Recognition or Dictation. It follows provider word timing when available and otherwise estimates word timing within each synchronized line locally.
 
 Media players other than Spotify and Music do not require Automation permission, but they must publish useful title and artist metadata to macOS Now Playing. Universal player support uses Apple's private MediaRemote framework and is intended for direct distribution rather than the Mac App Store.
 

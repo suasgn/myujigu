@@ -38,7 +38,8 @@ public enum AppleMusicLyricsParser {
             return LyricLine(
                 startTimeMs: line.startTimeMs,
                 endTimeMs: max(line.endTimeMs ?? fallbackEnd, line.startTimeMs + 1),
-                words: line.words
+                words: line.words,
+                syllables: line.syllables
             )
         }
 
@@ -86,12 +87,24 @@ public enum AppleMusicLyricsParser {
             let startTimeMs: Int
             let endTimeMs: Int?
             let words: String
+            let syllables: [Syllable]
+        }
+
+        private struct TimedSpan {
+            let startTimeMs: Int
+            let words: String
+        }
+
+        private struct PendingSpan {
+            let startTimeMs: Int?
+            var words = ""
         }
 
         private struct PendingLine {
             let startTimeMs: Int
             let endTimeMs: Int?
             var words = ""
+            var timedSpans: [TimedSpan] = []
         }
 
         private(set) var title = ""
@@ -101,6 +114,7 @@ public enum AppleMusicLyricsParser {
         private(set) var durationMs = 0
         private(set) var lines: [ParsedLine] = []
         private var pendingLine: PendingLine?
+        private var pendingSpans: [PendingSpan] = []
         private var isReadingTitle = false
         private var pendingTitle = ""
         private var isInsideAgent = false
@@ -142,6 +156,11 @@ public enum AppleMusicLyricsParser {
                 let end = attribute(named: "end", in: attributeDict)
                     .flatMap(AppleMusicLyricsParser.timeMilliseconds)
                 pendingLine = PendingLine(startTimeMs: begin, endTimeMs: end)
+                pendingSpans = []
+            case "span" where pendingLine != nil:
+                let begin = attribute(named: "begin", in: attributeDict)
+                    .flatMap(AppleMusicLyricsParser.timeMilliseconds)
+                pendingSpans.append(PendingSpan(startTimeMs: begin))
             case "br":
                 pendingLine?.words.append("\n")
             default:
@@ -152,6 +171,9 @@ public enum AppleMusicLyricsParser {
         func parser(_ parser: XMLParser, foundCharacters string: String) {
             if pendingLine != nil {
                 pendingLine?.words.append(string)
+                for index in pendingSpans.indices {
+                    pendingSpans[index].words.append(string)
+                }
             } else if isReadingArtist {
                 pendingArtist.append(string)
             } else if isReadingSongwriter {
@@ -196,15 +218,26 @@ public enum AppleMusicLyricsParser {
                 return
             }
 
+            if elementName == "span", let span = pendingSpans.popLast() {
+                if let startTimeMs = span.startTimeMs {
+                    pendingLine?.timedSpans.append(
+                        TimedSpan(startTimeMs: startTimeMs, words: span.words)
+                    )
+                }
+                return
+            }
+
             guard elementName == "p", let line = pendingLine else { return }
             pendingLine = nil
+            pendingSpans = []
             let words = normalizedWhitespace(line.words)
             guard !words.isEmpty else { return }
             lines.append(
                 ParsedLine(
                     startTimeMs: line.startTimeMs,
                     endTimeMs: line.endTimeMs,
-                    words: words
+                    words: words,
+                    syllables: syllables(in: words, from: line.timedSpans)
                 )
             )
         }
@@ -217,6 +250,32 @@ public enum AppleMusicLyricsParser {
 
         private func normalizedWhitespace(_ value: String) -> String {
             value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+
+        private func syllables(in words: String, from spans: [TimedSpan]) -> [Syllable] {
+            var searchStart = words.startIndex
+            var previousEndOffset = 0
+            var result: [Syllable] = []
+
+            for span in spans {
+                let spanWords = normalizedWhitespace(span.words)
+                guard !spanWords.isEmpty,
+                      let range = words.range(
+                        of: spanWords,
+                        range: searchStart..<words.endIndex
+                      )
+                else {
+                    continue
+                }
+
+                let endOffset = words.distance(from: words.startIndex, to: range.upperBound)
+                let count = endOffset - previousEndOffset
+                guard count > 0 else { continue }
+                result.append(Syllable(startTimeMs: span.startTimeMs, count: count))
+                previousEndOffset = endOffset
+                searchStart = range.upperBound
+            }
+            return result
         }
     }
 }

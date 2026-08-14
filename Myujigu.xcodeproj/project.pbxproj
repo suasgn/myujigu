@@ -26,6 +26,8 @@
 		100000000000000000000011 /* MyujiguCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* MyujiguCore.framework */; };
 		100000000000000000000012 /* LRCLIB.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* LRCLIB.swift */; };
 		100000000000000000000013 /* SystemNowPlayingPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* SystemNowPlayingPlayer.swift */; };
+		100000000000000000000014 /* RealtimeKaraoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* RealtimeKaraoke.swift */; };
+		100000000000000000000015 /* KaraokeWordTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* KaraokeWordTimeline.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -80,6 +82,8 @@
 		200000000000000000000012 /* MyujiguCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MyujiguCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000013 /* LRCLIB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRCLIB.swift; sourceTree = "<group>"; };
 		200000000000000000000014 /* SystemNowPlayingPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemNowPlayingPlayer.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* RealtimeKaraoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeKaraoke.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* KaraokeWordTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KaraokeWordTimeline.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -136,6 +140,7 @@
 				200000000000000000000003 /* AppModel.swift */,
 				200000000000000000000004 /* LyricsPopoverView.swift */,
 				200000000000000000000005 /* SpotifyLoginView.swift */,
+				200000000000000000000015 /* RealtimeKaraoke.swift */,
 			);
 			path = Myujigu;
 			sourceTree = "<group>";
@@ -152,6 +157,7 @@
 				200000000000000000000008 /* SpotifyAPI.swift */,
 				200000000000000000000009 /* SpotifyPlayer.swift */,
 				200000000000000000000014 /* SystemNowPlayingPlayer.swift */,
+				200000000000000000000016 /* KaraokeWordTimeline.swift */,
 			);
 			path = MyujiguCore;
 			sourceTree = "<group>";
@@ -308,6 +314,7 @@
 				100000000000000000000003 /* AppModel.swift in Sources */,
 				100000000000000000000004 /* LyricsPopoverView.swift in Sources */,
 				100000000000000000000005 /* SpotifyLoginView.swift in Sources */,
+				100000000000000000000014 /* RealtimeKaraoke.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -324,6 +331,7 @@
 				100000000000000000000008 /* SpotifyAPI.swift in Sources */,
 				100000000000000000000009 /* SpotifyPlayer.swift in Sources */,
 				100000000000000000000013 /* SystemNowPlayingPlayer.swift in Sources */,
+				100000000000000000000015 /* KaraokeWordTimeline.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
