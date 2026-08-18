@@ -28,7 +28,7 @@ open Myujigu.xcodeproj
 
 ## How it works
 
-Myujigu follows Spotify and Apple Music through macOS Automation and reads their own synchronized lyric sources. For other players, it reads the active macOS Now Playing session through MediaRemote and requests matching lyrics from LRCLIB using the track title, artist, album, and duration. Spotify and Apple Music never fall back to LRCLIB.
+Myujigu follows Spotify and Apple Music through macOS Automation and reads their own synchronized lyric sources. For other players, it reads the active macOS Now Playing session through MediaRemote and requests matching lyrics from LRCLIB using the track title, artist, album, and duration. When Spotify has no lyrics or only plain lyrics, Myujigu also checks LRCLIB for a synchronized match. This fallback requires exact normalized title, artist, and album metadata plus a duration within two seconds; when Spotify has plain lyrics, their text is compared locally before LRCLIB timing is accepted.
 
 For Spotify cache misses, open the music-note menu-bar item, select the gear, and choose **Sign In with Spotify**. The login runs in a temporary isolated web view; Myujigu stores only the resulting `sp_dc` session cookie in macOS Keychain and sends it only to Spotify.
 

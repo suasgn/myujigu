@@ -139,6 +139,12 @@ public actor LRCLIBClient {
         let lyrics: Lyrics?
     }
 
+    private struct VerifiedCandidate {
+        let lyrics: Lyrics
+        let textScore: Double
+        let durationDifferenceMs: Int
+    }
+
     private let baseURL: URL
     private let session: URLSession
     private let cacheDirectory: URL
@@ -218,7 +224,107 @@ public actor LRCLIBClient {
         return lyrics
     }
 
+    /// Finds synchronized lyrics for a native player only when LRCLIB's record
+    /// can be tied to the current track conservatively. Unlike `fetchLyrics`,
+    /// this requires album and duration metadata and never returns plain lyrics.
+    /// When native plain lyrics are available, their text must also agree with
+    /// the synchronized LRCLIB text.
+    public func fetchVerifiedSyncedLyrics(
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int,
+        matching referenceLyrics: Lyrics? = nil,
+        ignoreCache: Bool = false
+    ) async throws -> Lyrics? {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = album.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !artist.isEmpty, !album.isEmpty, durationMs > 0 else {
+            return nil
+        }
+
+        let referenceText = referenceLyrics
+            .map { $0.lines.map(\.words).joined(separator: "\n") }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let referenceFingerprint = referenceText
+            .map { normalizedTokens($0).joined(separator: " ") }
+            ?? "metadata-only"
+        let cacheKey = Self.cacheKey(
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs,
+            variant: "verified-synced-v1:\(referenceFingerprint)"
+        )
+        if !ignoreCache, let cached = readCache(cacheKey) {
+            let lifetime = cached.lyrics == nil ? negativeCacheLifetime : positiveCacheLifetime
+            if Date().timeIntervalSince(cached.fetchedAt) < lifetime {
+                return cached.lyrics
+            }
+        }
+
+        let exact = try await exactResponse(
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs
+        )
+        if let exact,
+           let verified = verifiedCandidate(
+               exact,
+               title: title,
+               artist: artist,
+               album: album,
+               durationMs: durationMs,
+               referenceText: referenceText
+           )
+        {
+            writeCache(CachedResult(fetchedAt: Date(), lyrics: verified.lyrics), key: cacheKey)
+            return verified.lyrics
+        }
+
+        let responses = try await searchResponses(
+            title: title,
+            artist: artist,
+            album: album
+        )
+        let verified = selectVerifiedCandidate(
+            responses,
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs,
+            referenceText: referenceText
+        )?.lyrics
+        writeCache(CachedResult(fetchedAt: Date(), lyrics: verified), key: cacheKey)
+        return verified
+    }
+
     private func exactMatch(
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int
+    ) async throws -> Response? {
+        guard let response = try await exactResponse(
+            title: title,
+            artist: artist,
+            album: album,
+            durationMs: durationMs
+        ) else {
+            return nil
+        }
+        return metadataMatches(
+            response,
+            title: title,
+            artist: artist,
+            durationMs: durationMs
+        ) ? response : nil
+    }
+
+    private func exactResponse(
         title: String,
         artist: String,
         album: String,
@@ -240,12 +346,7 @@ public actor LRCLIBClient {
         guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
             throw LRCLIBError.malformedResponse
         }
-        return metadataMatches(
-            response,
-            title: title,
-            artist: artist,
-            durationMs: durationMs
-        ) ? response : nil
+        return response
     }
 
     private func searchMatch(
@@ -254,6 +355,31 @@ public actor LRCLIBClient {
         album: String,
         durationMs: Int
     ) async throws -> Response? {
+        let responses = try await searchResponses(
+            title: title,
+            artist: artist,
+            album: album
+        )
+        return responses
+            .filter {
+                metadataMatches(
+                    $0,
+                    title: title,
+                    artist: artist,
+                    durationMs: durationMs
+                ) && $0.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
+            .max { left, right in
+                matchScore(left, album: album, durationMs: durationMs)
+                    < matchScore(right, album: album, durationMs: durationMs)
+            }
+    }
+
+    private func searchResponses(
+        title: String,
+        artist: String,
+        album: String
+    ) async throws -> [Response] {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("api/search"),
             resolvingAgainstBaseURL: false
@@ -270,20 +396,7 @@ public actor LRCLIBClient {
         guard let responses = try? JSONDecoder().decode([Response].self, from: data) else {
             throw LRCLIBError.malformedResponse
         }
-
         return responses
-            .filter {
-                metadataMatches(
-                    $0,
-                    title: title,
-                    artist: artist,
-                    durationMs: durationMs
-                ) && $0.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            }
-            .max { left, right in
-                matchScore(left, album: album, durationMs: durationMs)
-                    < matchScore(right, album: album, durationMs: durationMs)
-            }
     }
 
     private func metadataQueryItems(
@@ -366,6 +479,163 @@ public actor LRCLIBClient {
         return nil
     }
 
+    private func makeSynchronizedLyrics(
+        from response: Response,
+        requestedDurationMs: Int
+    ) -> Lyrics? {
+        guard let synced = response.syncedLyrics else { return nil }
+        return LRCParser.parse(synced, durationMs: requestedDurationMs)
+    }
+
+    private func verifiedCandidate(
+        _ response: Response,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int,
+        referenceText: String?
+    ) -> VerifiedCandidate? {
+        guard strictNormalize(response.trackName ?? "") == strictNormalize(title),
+              strictNormalize(response.artistName ?? "") == strictNormalize(artist),
+              strictNormalize(response.albumName ?? "") == strictNormalize(album),
+              let responseDuration = response.duration
+        else {
+            return nil
+        }
+
+        let responseDurationMs = Int((responseDuration * 1_000).rounded())
+        let durationDifferenceMs = abs(responseDurationMs - durationMs)
+        guard durationDifferenceMs <= 2_000,
+              let lyrics = makeSynchronizedLyrics(
+                  from: response,
+                  requestedDurationMs: durationMs
+              )
+        else {
+            return nil
+        }
+
+        let textScore: Double
+        if let referenceText {
+            let candidateText = lyrics.lines.map(\.words).joined(separator: "\n")
+            guard let similarity = lyricTextSimilarity(
+                reference: referenceText,
+                candidate: candidateText
+            ) else {
+                return nil
+            }
+            textScore = similarity
+        } else {
+            textScore = 1
+        }
+
+        return VerifiedCandidate(
+            lyrics: lyrics,
+            textScore: textScore,
+            durationDifferenceMs: durationDifferenceMs
+        )
+    }
+
+    private func selectVerifiedCandidate(
+        _ responses: [Response],
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int,
+        referenceText: String?
+    ) -> VerifiedCandidate? {
+        let candidates = responses.compactMap {
+            verifiedCandidate(
+                $0,
+                title: title,
+                artist: artist,
+                album: album,
+                durationMs: durationMs,
+                referenceText: referenceText
+            )
+        }.sorted {
+            if $0.textScore != $1.textScore {
+                return $0.textScore > $1.textScore
+            }
+            return $0.durationDifferenceMs < $1.durationDifferenceMs
+        }
+
+        guard let best = candidates.first else { return nil }
+        if candidates.count > 1 {
+            let runnerUp = candidates[1]
+            let sameLyrics = best.lyrics.lines == runnerUp.lyrics.lines
+            let clearlyBetterText = best.textScore - runnerUp.textScore >= 0.03
+            let clearlyCloserDuration = runnerUp.durationDifferenceMs
+                - best.durationDifferenceMs >= 500
+            if !sameLyrics, !clearlyBetterText, !clearlyCloserDuration {
+                return nil
+            }
+        }
+        return best
+    }
+
+    private func lyricTextSimilarity(reference: String, candidate: String) -> Double? {
+        let referenceTokens = normalizedTokens(reference)
+        let candidateTokens = normalizedTokens(candidate)
+        guard !referenceTokens.isEmpty, !candidateTokens.isEmpty else { return nil }
+
+        if max(referenceTokens.count, candidateTokens.count) <= 8 {
+            return referenceTokens == candidateTokens ? 1 : nil
+        }
+        guard referenceTokens.count <= 4_000, candidateTokens.count <= 4_000 else {
+            return nil
+        }
+
+        var previous = [Int](repeating: 0, count: candidateTokens.count + 1)
+        for referenceToken in referenceTokens {
+            var current = [Int](repeating: 0, count: candidateTokens.count + 1)
+            for candidateIndex in candidateTokens.indices {
+                if referenceToken == candidateTokens[candidateIndex] {
+                    current[candidateIndex + 1] = previous[candidateIndex] + 1
+                } else {
+                    current[candidateIndex + 1] = max(
+                        previous[candidateIndex + 1],
+                        current[candidateIndex]
+                    )
+                }
+            }
+            previous = current
+        }
+
+        let commonTokenCount = previous[candidateTokens.count]
+        let shorterCount = min(referenceTokens.count, candidateTokens.count)
+        let longerCount = max(referenceTokens.count, candidateTokens.count)
+        let shorterCoverage = Double(commonTokenCount) / Double(shorterCount)
+        let longerCoverage = Double(commonTokenCount) / Double(longerCount)
+        guard shorterCoverage >= 0.90, longerCoverage >= 0.82 else { return nil }
+        return shorterCoverage * 0.6 + longerCoverage * 0.4
+    }
+
+    private func normalizedTokens(_ value: String) -> [String] {
+        let folded = value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        var tokens: [String] = []
+        var token = ""
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                token.unicodeScalars.append(scalar)
+            } else if scalar.value == 0x27 || scalar.value == 0x2019 {
+                continue
+            } else if !token.isEmpty {
+                tokens.append(token)
+                token = ""
+            }
+        }
+        if !token.isEmpty {
+            tokens.append(token)
+        }
+        return tokens
+    }
+
+    private func strictNormalize(_ value: String) -> String {
+        normalizedTokens(value).joined(separator: " ")
+    }
+
     private func normalize(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .unicodeScalars
@@ -390,9 +660,11 @@ public actor LRCLIBClient {
         title: String,
         artist: String,
         album: String,
-        durationMs: Int
+        durationMs: Int,
+        variant: String = ""
     ) -> String {
-        let value = "\(title)\u{1f}\(artist)\u{1f}\(album)\u{1f}\(durationMs)"
+        let metadata = "\(title)\u{1f}\(artist)\u{1f}\(album)\u{1f}\(durationMs)"
+        let value = (variant.isEmpty ? metadata : "\(variant)\u{1f}\(metadata)")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in value.utf8 {

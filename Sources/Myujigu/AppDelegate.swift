@@ -8,7 +8,12 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private enum UpdateCadence {
-        static let menuBarLayout: TimeInterval = 2.0
+        static let menuBarLayout: TimeInterval = 1.0
+        static let applicationMenuMeasurement: TimeInterval = 1.0
+    }
+
+    private enum LayoutAnimation {
+        static let resizeDuration: TimeInterval = 0.8
     }
 
     // The real status item stays square and acts only as a stable popover
@@ -295,7 +300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let now = ProcessInfo.processInfo.systemUptime
         let shouldMeasureApplicationMenu = force
             || menuOwnerPID != lastMenuOwnerPID
-            || now - lastMenuMeasurementUptime >= 5
+            || now - lastMenuMeasurementUptime
+                >= UpdateCadence.applicationMenuMeasurement
         let applicationMenuRightEdge: CGFloat?
         if shouldMeasureApplicationMenu {
             applicationMenuRightEdge = menuOwner.flatMap(applicationMenuRightEdge(for:))
@@ -411,26 +417,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             )
         }
 
-        apply(
+        let leftResizeDuration = apply(
             frame: leftStripFrame,
             to: leftStripPanel,
             backdrop: leftStripBackdrop,
             view: leftMarqueeView,
-            coversMenuBarItems: model.menuBarLyricsLeftLayout == .fixed
+            animatesResize: model.menuBarLyricsLeftLayout == .automatic
         )
-        apply(
+        let rightResizeDuration = apply(
             frame: rightStripFrame,
             to: rightStripPanel,
             backdrop: rightStripBackdrop,
             view: rightMarqueeView,
-            coversMenuBarItems: model.menuBarLyricsRightLayout == .fixed
+            animatesResize: model.menuBarLyricsRightLayout == .automatic
         )
 
         let combinedWidth = leftStripFrame.width + rightStripFrame.width
-        leftMarqueeView.setVirtualViewport(originX: 0, totalWidth: combinedWidth)
+        let viewportTransitionDuration = max(leftResizeDuration, rightResizeDuration)
+        leftMarqueeView.setVirtualViewport(
+            originX: 0,
+            totalWidth: combinedWidth,
+            transitionDuration: viewportTransitionDuration
+        )
         rightMarqueeView.setVirtualViewport(
             originX: leftStripFrame.width,
-            totalWidth: combinedWidth
+            totalWidth: combinedWidth,
+            transitionDuration: viewportTransitionDuration
         )
     }
 
@@ -450,17 +462,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         to panel: NSPanel,
         backdrop: MenuBarBackdropView,
         view: MarqueeStatusView,
-        coversMenuBarItems: Bool
-    ) {
-        backdrop.isHidden = !coversMenuBarItems
+        animatesResize: Bool
+    ) -> TimeInterval {
+        backdrop.isHidden = false
         guard !frame.isEmpty else {
             panel.orderOut(nil)
-            return
+            return 0
         }
-        panel.setFrame(frame, display: true)
-        backdrop.frame = NSRect(origin: .zero, size: frame.size)
-        view.frame = NSRect(origin: .zero, size: frame.size)
-        view.updateLayerLayout()
+        let shouldAnimateResize = animatesResize
+            && panel.isVisible
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            && !NSEqualRects(panel.frame, frame)
+        guard shouldAnimateResize else {
+            panel.setFrame(frame, display: true)
+            backdrop.frame = NSRect(origin: .zero, size: frame.size)
+            view.frame = NSRect(origin: .zero, size: frame.size)
+            view.updateLayerLayout()
+            return 0
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = LayoutAnimation.resizeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(frame, display: true)
+        }
+        return LayoutAnimation.resizeDuration
     }
 
     private func syncMenuBarAppearance() {
@@ -796,8 +822,11 @@ private final class MarqueeStatusView: NSView {
     private let driftCorrectionDeadbandMs: Double = 50
     private let pausedResyncDriftMs: Double = 150
     private let hardResyncDriftMs: Double = 750
+    private let maximumAnimatedResyncDriftMs: Double = 5_000
+    private let resyncTransitionDuration: TimeInterval = 0.5
     private let maximumPlaybackRateCorrection: Double = 0.1
     private let clipLayer = CALayer()
+    private let viewportTransitionLayer = CALayer()
     private let movingLayer = CALayer()
     private let noteLayer = CATextLayer()
     private let firstFallbackLayer = CATextLayer()
@@ -864,9 +893,12 @@ private final class MarqueeStatusView: NSView {
         withoutImplicitAnimations {
             rootLayer.masksToBounds = true
             clipLayer.masksToBounds = true
+            viewportTransitionLayer.anchorPoint = .zero
+            viewportTransitionLayer.position = .zero
             movingLayer.anchorPoint = .zero
             movingLayer.position = .zero
-            clipLayer.addSublayer(movingLayer)
+            clipLayer.addSublayer(viewportTransitionLayer)
+            viewportTransitionLayer.addSublayer(movingLayer)
             rootLayer.addSublayer(clipLayer)
             rootLayer.addSublayer(noteLayer)
             movingLayer.addSublayer(firstFallbackLayer)
@@ -894,6 +926,8 @@ private final class MarqueeStatusView: NSView {
                 width: max(bounds.width - textOriginX - 8, 0),
                 height: bounds.height
             )
+            viewportTransitionLayer.bounds = clipLayer.bounds
+            viewportTransitionLayer.position = .zero
             movingLayer.bounds = CGRect(
                 x: 0,
                 y: 0,
@@ -941,13 +975,32 @@ private final class MarqueeStatusView: NSView {
         }
     }
 
-    func setVirtualViewport(originX: CGFloat, totalWidth: CGFloat) {
+    func setVirtualViewport(
+        originX: CGFloat,
+        totalWidth: CGFloat,
+        transitionDuration: TimeInterval = 0
+    ) {
         guard virtualViewportOriginX != originX || virtualViewportWidth != totalWidth else {
             return
+        }
+
+        let mediaTime = CACurrentMediaTime()
+        let previousTranslation = prepareForMotionPathChange()
+        if !timelineSegments.isEmpty {
+            // Rebase at the presentation time, not the last player poll. A
+            // layout refresh must never make the lyric jump backwards.
+            timelinePositionMs = animationAnchorPositionMs
+                + (mediaTime - animationAnchorMediaTime)
+                    * 1_000 * appliedTimelinePlaybackRate
         }
         virtualViewportOriginX = originX
         virtualViewportWidth = totalWidth
         rebuildMotionAnimation()
+        animateMotionPathChange(
+            from: previousTranslation,
+            duration: transitionDuration,
+            at: mediaTime
+        )
     }
 
     func updateTimeline(
@@ -992,10 +1045,19 @@ private final class MarqueeStatusView: NSView {
                 || abs(driftMs) >= hardResyncDriftMs
                 || (!isPlaying && abs(driftMs) >= pausedResyncDriftMs)
             {
-                // Playback changes and seeks should take effect immediately.
+                // Ease ordinary clock corrections into place. Playback state
+                // changes and large user seeks still take effect immediately.
+                let previousTranslation = prepareForMotionPathChange()
                 timelinePositionMs = reportedPositionMs
                 timelinePlaybackRate = 1
                 rebuildMotionAnimation()
+                let animatesResync = !playbackChanged
+                    && abs(driftMs) <= maximumAnimatedResyncDriftMs
+                animateMotionPathChange(
+                    from: previousTranslation,
+                    duration: animatesResync ? resyncTransitionDuration : 0,
+                    at: now
+                )
             } else if isPlaying {
                 // Keep the current presentation position and gently change the
                 // Core Animation clock until it converges with the player.
@@ -1394,6 +1456,42 @@ private final class MarqueeStatusView: NSView {
             movingLayer.timeOffset = 0
             movingLayer.beginTime = 0
         }
+    }
+
+    private func prepareForMotionPathChange() -> CGFloat {
+        let translation = (
+            viewportTransitionLayer.presentation()?.affineTransform().tx
+                ?? viewportTransitionLayer.affineTransform().tx
+        ) + (
+            movingLayer.presentation()?.affineTransform().tx
+                ?? movingLayer.affineTransform().tx
+        )
+        viewportTransitionLayer.removeAnimation(forKey: "viewportTransition")
+        withoutImplicitAnimations {
+            viewportTransitionLayer.setAffineTransform(.identity)
+        }
+        return translation
+    }
+
+    private func animateMotionPathChange(
+        from previousTranslation: CGFloat,
+        duration: TimeInterval,
+        at mediaTime: CFTimeInterval
+    ) {
+        guard duration > 0 else { return }
+        let updatedTranslation = timelineSegments.isEmpty
+            ? -virtualViewportOriginX
+            : timelineTranslation(at: timelinePositionMs)
+        let translationDelta = previousTranslation - updatedTranslation
+        guard abs(translationDelta) >= 0.5 else { return }
+
+        let transition = CABasicAnimation(keyPath: "transform.translation.x")
+        transition.fromValue = NSNumber(value: Double(translationDelta))
+        transition.toValue = NSNumber(value: 0)
+        transition.duration = duration
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        transition.beginTime = viewportTransitionLayer.convertTime(mediaTime, from: nil)
+        viewportTransitionLayer.add(transition, forKey: "viewportTransition")
     }
 
     private func timelineTranslation(at positionMs: Double) -> CGFloat {

@@ -249,6 +249,238 @@ final class MyujiguCoreTests: XCTestCase {
         )
     }
 
+    func testVerifiedLRCLIBAcceptsMatchingSpotifyPlainLyrics() async throws {
+        try await withLRCLIBClient { request in
+            let body = #"""
+            {
+              "id": 101,
+              "trackName": "Careful Song",
+              "artistName": "Test Artist",
+              "albumName": "Test Album",
+              "duration": 180.4,
+              "instrumental": false,
+              "plainLyrics": "Morning light falls over the city\nWe follow every winding road back home tonight",
+              "syncedLyrics": "[00:02.00]Morning light falls over the city\n[00:07.50]We follow every winding road back home tonight"
+            }
+            """#
+            return try lrclibResponse(for: request, statusCode: 200, body: body)
+        } operation: { client in
+            let spotifyLyrics = Lyrics(
+                syncType: "UNSYNCED",
+                lines: [
+                    LyricLine(
+                        startTimeMs: 0,
+                        endTimeMs: 180_000,
+                        words: "Morning light falls over the city. We follow every winding road back home tonight!"
+                    ),
+                ]
+            )
+            let lyrics = try await client.fetchVerifiedSyncedLyrics(
+                title: "Careful Song",
+                artist: "Test Artist",
+                album: "Test Album",
+                durationMs: 180_000,
+                matching: spotifyLyrics
+            )
+
+            XCTAssertEqual(lyrics?.syncType, "LINE_SYNCED")
+            XCTAssertEqual(lyrics?.lines.map(\.startTimeMs), [2_000, 7_500])
+        }
+    }
+
+    func testVerifiedLRCLIBRejectsMetadataAndTextMismatches() async throws {
+        try await withLRCLIBClient { request in
+            let path = try XCTUnwrap(request.url?.path)
+            if path == "/api/get" {
+                let wrongAlbum = #"""
+                {
+                  "id": 201,
+                  "trackName": "Careful Song",
+                  "artistName": "Test Artist",
+                  "albumName": "Live Album",
+                  "duration": 180.0,
+                  "instrumental": false,
+                  "plainLyrics": "Morning light falls over the city",
+                  "syncedLyrics": "[00:02.00]Morning light falls over the city"
+                }
+                """#
+                return try lrclibResponse(for: request, statusCode: 200, body: wrongAlbum)
+            }
+
+            let rejectedCandidates = #"""
+            [
+              {
+                "id": 202,
+                "trackName": "Careful Song",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 180.0,
+                "instrumental": false,
+                "plainLyrics": "Completely unrelated words from a different recording fill every line",
+                "syncedLyrics": "[00:02.00]Completely unrelated words from a different recording fill every line"
+              },
+              {
+                "id": 203,
+                "trackName": "Careful Song",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 182.1,
+                "instrumental": false,
+                "plainLyrics": "Morning light falls over the city We follow every winding road back home tonight",
+                "syncedLyrics": "[00:02.00]Morning light falls over the city\n[00:07.50]We follow every winding road back home tonight"
+              },
+              {
+                "id": 204,
+                "trackName": "Careful Song Live",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 180.0,
+                "instrumental": false,
+                "plainLyrics": "Morning light falls over the city We follow every winding road back home tonight",
+                "syncedLyrics": "[00:02.00]Morning light falls over the city\n[00:07.50]We follow every winding road back home tonight"
+              },
+              {
+                "id": 205,
+                "trackName": "CarefulSong",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 180.0,
+                "instrumental": false,
+                "plainLyrics": "Morning light falls over the city We follow every winding road back home tonight",
+                "syncedLyrics": "[00:02.00]Morning light falls over the city\n[00:07.50]We follow every winding road back home tonight"
+              }
+            ]
+            """#
+            return try lrclibResponse(for: request, statusCode: 200, body: rejectedCandidates)
+        } operation: { client in
+            let spotifyLyrics = Lyrics(
+                syncType: "UNSYNCED",
+                lines: [
+                    LyricLine(
+                        startTimeMs: 0,
+                        endTimeMs: 180_000,
+                        words: "Morning light falls over the city We follow every winding road back home tonight"
+                    ),
+                ]
+            )
+            let lyrics = try await client.fetchVerifiedSyncedLyrics(
+                title: "Careful Song",
+                artist: "Test Artist",
+                album: "Test Album",
+                durationMs: 180_000,
+                matching: spotifyLyrics
+            )
+
+            XCTAssertNil(lyrics)
+            XCTAssertEqual(LRCLIBURLProtocolStub.lastRequest?.url?.path, "/api/search")
+        }
+    }
+
+    func testVerifiedLRCLIBUsesExactMetadataWhenSpotifyHasNoLyrics() async throws {
+        try await withLRCLIBClient { request in
+            let body = #"""
+            {
+              "id": 301,
+              "trackName": "Missing Lyrics Song",
+              "artistName": "Test Artist",
+              "albumName": "Test Album",
+              "duration": 211.25,
+              "instrumental": false,
+              "plainLyrics": "A verified LRCLIB lyric",
+              "syncedLyrics": "[00:04.20]A verified LRCLIB lyric"
+            }
+            """#
+            return try lrclibResponse(for: request, statusCode: 200, body: body)
+        } operation: { client in
+            let lyrics = try await client.fetchVerifiedSyncedLyrics(
+                title: "Missing Lyrics Song",
+                artist: "Test Artist",
+                album: "Test Album",
+                durationMs: 211_000
+            )
+
+            XCTAssertEqual(lyrics?.lines.first?.startTimeMs, 4_200)
+        }
+    }
+
+    func testVerifiedLRCLIBRejectsAmbiguousSearchTiming() async throws {
+        try await withLRCLIBClient { request in
+            let path = try XCTUnwrap(request.url?.path)
+            if path == "/api/get" {
+                return try lrclibResponse(for: request, statusCode: 404, body: "{}")
+            }
+            let ambiguousCandidates = #"""
+            [
+              {
+                "id": 401,
+                "trackName": "Ambiguous Song",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 200.0,
+                "instrumental": false,
+                "plainLyrics": "One shared lyric line and another shared lyric line for matching",
+                "syncedLyrics": "[00:03.00]One shared lyric line\n[00:08.00]and another shared lyric line for matching"
+              },
+              {
+                "id": 402,
+                "trackName": "Ambiguous Song",
+                "artistName": "Test Artist",
+                "albumName": "Test Album",
+                "duration": 200.0,
+                "instrumental": false,
+                "plainLyrics": "One shared lyric line and another shared lyric line for matching",
+                "syncedLyrics": "[00:04.00]One shared lyric line\n[00:09.00]and another shared lyric line for matching"
+              }
+            ]
+            """#
+            return try lrclibResponse(for: request, statusCode: 200, body: ambiguousCandidates)
+        } operation: { client in
+            let spotifyLyrics = Lyrics(
+                syncType: "UNSYNCED",
+                lines: [
+                    LyricLine(
+                        startTimeMs: 0,
+                        endTimeMs: 200_000,
+                        words: "One shared lyric line and another shared lyric line for matching"
+                    ),
+                ]
+            )
+            let lyrics = try await client.fetchVerifiedSyncedLyrics(
+                title: "Ambiguous Song",
+                artist: "Test Artist",
+                album: "Test Album",
+                durationMs: 200_000,
+                matching: spotifyLyrics
+            )
+
+            XCTAssertNil(lyrics)
+        }
+    }
+
+    func testVerifiedLRCLIBRequiresAlbumAndDuration() async throws {
+        try await withLRCLIBClient { request in
+            XCTFail("A verified lookup with incomplete metadata must not make a request")
+            return try lrclibResponse(for: request, statusCode: 500, body: "{}")
+        } operation: { client in
+            let missingAlbum = try await client.fetchVerifiedSyncedLyrics(
+                title: "Careful Song",
+                artist: "Test Artist",
+                album: "",
+                durationMs: 180_000
+            )
+            let missingDuration = try await client.fetchVerifiedSyncedLyrics(
+                title: "Careful Song",
+                artist: "Test Artist",
+                album: "Test Album",
+                durationMs: 0
+            )
+
+            XCTAssertNil(missingAlbum)
+            XCTAssertNil(missingDuration)
+            XCTAssertNil(LRCLIBURLProtocolStub.lastRequest)
+        }
+    }
+
     func testAppleMusicTTMLParser() throws {
         let ttml = #"""
         <tt xmlns="http://www.w3.org/ns/ttml"
@@ -669,6 +901,50 @@ final class MyujiguCoreTests: XCTestCase {
         }
         XCTAssertEqual(SpotifyAPI.decodeSecret(encoded), expected)
     }
+
+    private func withLRCLIBClient(
+        _ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data),
+        operation: (LRCLIBClient) async throws -> Void
+    ) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("myujigu-verified-lrclib-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LRCLIBURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        LRCLIBURLProtocolStub.handler = handler
+        LRCLIBURLProtocolStub.lastRequest = nil
+        defer {
+            session.invalidateAndCancel()
+            LRCLIBURLProtocolStub.handler = nil
+            LRCLIBURLProtocolStub.lastRequest = nil
+        }
+
+        let client = LRCLIBClient(
+            baseURL: URL(string: "https://lrclib.test")!,
+            session: session,
+            cacheDirectory: directory
+        )
+        try await operation(client)
+    }
+}
+
+private func lrclibResponse(
+    for request: URLRequest,
+    statusCode: Int,
+    body: String
+) throws -> (HTTPURLResponse, Data) {
+    let response = try XCTUnwrap(
+        HTTPURLResponse(
+            url: try XCTUnwrap(request.url),
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )
+    )
+    return (response, Data(body.utf8))
 }
 
 private final class LRCLIBURLProtocolStub: URLProtocol {

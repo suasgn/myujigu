@@ -850,7 +850,7 @@ private struct SettingsView: View {
                 .foregroundStyle(accent)
                 .padding(.top, 12)
 
-            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify. For other players, track metadata is sent to LRCLIB to find lyrics. Realtime Karaoke uses lyric timestamps locally and does not record system audio.")
+            Text("The sign-in page runs in an isolated web view that is discarded after login. Only Spotify’s session cookie is retained in macOS Keychain and sent back to Spotify. Track metadata is sent to LRCLIB for other players and when Spotify has no synchronized lyrics. Any Spotify lyric-text comparison stays on this Mac. Realtime Karaoke uses lyric timestamps locally and does not record system audio.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

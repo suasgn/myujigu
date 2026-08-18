@@ -617,6 +617,7 @@ final class AppModel: ObservableObject {
             }
 
             var appleMusicPlainLyrics: String?
+            var ignoreLRCLIBCache = force
 
             while !Task.isCancelled, playerState.trackID == trackID {
                 if sourcePlayer == .appleMusic {
@@ -646,7 +647,19 @@ final class AppModel: ObservableObject {
 
                 if let cached = await cefCache.findLyrics(trackID: trackID) {
                     guard !Task.isCancelled, playerState.trackID == trackID else { return }
-                    install(cached, source: .spotifyCache)
+                    let ignoreCache = ignoreLRCLIBCache
+                    ignoreLRCLIBCache = false
+                    do {
+                        _ = try await installSpotifyLyricsOrFallback(
+                            cached,
+                            source: .spotifyCache,
+                            trackID: trackID,
+                            ignoreCache: ignoreCache
+                        )
+                    } catch {
+                        guard !Task.isCancelled, playerState.trackID == trackID else { return }
+                        install(cached, source: .spotifyCache)
+                    }
                     return
                 }
 
@@ -657,22 +670,74 @@ final class AppModel: ObservableObject {
                         api = SpotifyAPI(cookie: cookie)
                     }
 
+                    var fetchedLyrics: Lyrics?
+                    var spotifyFailure: Error?
                     do {
-                        let fetched = try await api?.fetchLyrics(trackID: trackID)
-                        guard !Task.isCancelled, playerState.trackID == trackID else { return }
-                        if let fetched {
-                            install(fetched, source: .spotifyAPI)
+                        fetchedLyrics = try await api?.fetchLyrics(trackID: trackID)
+                    } catch {
+                        spotifyFailure = error
+                    }
+                    guard !Task.isCancelled, playerState.trackID == trackID else { return }
+
+                    if let fetchedLyrics {
+                        let ignoreCache = ignoreLRCLIBCache
+                        ignoreLRCLIBCache = false
+                        do {
+                            if try await installSpotifyLyricsOrFallback(
+                                fetchedLyrics,
+                                source: .spotifyAPI,
+                                trackID: trackID,
+                                ignoreCache: ignoreCache
+                            ) {
+                                return
+                            }
+                        } catch {
+                            guard !Task.isCancelled, playerState.trackID == trackID else { return }
+                            install(fetchedLyrics, source: .spotifyAPI)
                             return
                         }
-                        recordLyricsFailure("No lyrics are available for this track.")
+                    } else {
+                        let ignoreCache = ignoreLRCLIBCache
+                        ignoreLRCLIBCache = false
+                        do {
+                            if try await installSpotifyLyricsOrFallback(
+                                nil,
+                                source: nil,
+                                trackID: trackID,
+                                ignoreCache: ignoreCache
+                            ) {
+                                return
+                            }
+                        } catch {
+                            if spotifyFailure == nil {
+                                spotifyFailure = error
+                            }
+                        }
+                        guard !Task.isCancelled, playerState.trackID == trackID else { return }
+                        recordLyricsFailure(
+                            spotifyFailure?.localizedDescription
+                                ?? "No matching lyrics are available from Spotify or LRCLIB."
+                        )
+                    }
+                } else {
+                    let ignoreCache = ignoreLRCLIBCache
+                    ignoreLRCLIBCache = false
+                    do {
+                        if try await installSpotifyLyricsOrFallback(
+                            nil,
+                            source: nil,
+                            trackID: trackID,
+                            ignoreCache: ignoreCache
+                        ) {
+                            return
+                        }
+                        recordLyricsFailure(
+                            "LRCLIB has no verified match. Sign in with Spotify in Settings."
+                        )
                     } catch {
                         guard !Task.isCancelled, playerState.trackID == trackID else { return }
                         recordLyricsFailure(error.localizedDescription)
                     }
-                } else {
-                    recordLyricsFailure(
-                        "No cached lyrics. Sign in with Spotify in Settings."
-                    )
                 }
 
                 do {
@@ -682,6 +747,54 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func installSpotifyLyricsOrFallback(
+        _ spotifyLyrics: Lyrics?,
+        source: LyricsSource?,
+        trackID: String,
+        ignoreCache: Bool
+    ) async throws -> Bool {
+        guard !Task.isCancelled, playerState.trackID == trackID else { return false }
+
+        if let spotifyLyrics, spotifyLyrics.syncType.uppercased() != "UNSYNCED" {
+            if let source {
+                install(spotifyLyrics, source: source)
+                return true
+            }
+            return false
+        }
+
+        let state = playerState
+        do {
+            let fallback = try await lrclib.fetchVerifiedSyncedLyrics(
+                title: state.title,
+                artist: state.artist,
+                album: state.album,
+                durationMs: state.durationMs,
+                matching: spotifyLyrics,
+                ignoreCache: ignoreCache
+            )
+            guard !Task.isCancelled, playerState.trackID == trackID else { return false }
+            if let fallback {
+                install(fallback, source: .lrclib)
+                return true
+            }
+        } catch {
+            if let spotifyLyrics, let source,
+               !Task.isCancelled, playerState.trackID == trackID
+            {
+                install(spotifyLyrics, source: source)
+                return true
+            }
+            throw error
+        }
+
+        if let spotifyLyrics, let source {
+            install(spotifyLyrics, source: source)
+            return true
+        }
+        return false
     }
 
     private func recordLyricsFailure(_ message: String) {
